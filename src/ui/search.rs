@@ -109,7 +109,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     app.search.query = d.clone();
                     acts.push(Act::Search);
                 }
-                ui.horizontal(|ui| {
+                // Wraps so the tabs never push the panel wider at large text sizes.
+                ui.horizontal_wrapped(|ui| {
                     for (tab, name, n) in [
                         (SearchTab::Tracks, tr.tracks, r.tracks.len()),
                         (SearchTab::Albums, tr.albums, r.albums.len()),
