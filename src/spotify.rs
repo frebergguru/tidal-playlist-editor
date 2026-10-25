@@ -125,6 +125,8 @@ pub fn track_from(v: &Value) -> Option<Track> {
         album_id: None,
         // `is_playable` is only present with a market; false = not playable there.
         availability: (playable == Some(false)).then(Vec::new),
+        media_tags: Vec::new(),
+        popularity: None,
     })
 }
 

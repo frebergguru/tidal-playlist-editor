@@ -13,9 +13,10 @@ use crate::ops::files::{self, ExportFormat, ExportPlaylist, ImportPlaylist};
 use crate::ops::generate::MAX_SONGS;
 use crate::ops::matcher::{MatchMethod, MatchRow};
 use crate::ops::recommend::Recommendation;
+use crate::ops::upgrade;
 use crate::spotify::SpPlaylist;
 use crate::store::{Config, Language, MotionChoice, OpenIn, ThemeChoice};
-use crate::worker::{Cmd, Dest, Reason, UnavailableHit};
+use crate::worker::{BetterHit, BetterMode, Cmd, Dest, Reason, UnavailableHit};
 
 pub struct SettingsForm {
     pub cfg: Config,
@@ -98,6 +99,19 @@ impl VideosDialog {
         self.use_music = music.iter().map(Option::is_some).collect();
         self.music = Some(music);
     }
+}
+
+pub struct BetterDialog {
+    pub mode: BetterMode,
+    /// Choosing which playlists to look through (before the search).
+    pub setup: bool,
+    pub all: bool,
+    pub current: Option<String>,
+    pub hits: Vec<BetterHit>,
+    /// Ticked: change this song (replace it with `better`, or remove it).
+    pub change: Vec<bool>,
+    /// Clean versions: replace (ticked) or remove (unticked).
+    pub use_better: Vec<bool>,
 }
 
 pub struct GenerateDialog {
@@ -187,6 +201,7 @@ pub enum Dialog {
     Recommend(Box<RecommendDialog>),
     Generate(Box<GenerateDialog>),
     Videos(Box<VideosDialog>),
+    Better(Box<BetterDialog>),
     Duplicates {
         pid: String,
         mode: DupMode,
@@ -307,6 +322,31 @@ impl Dialog {
             music: None,
             use_music: vec![false; n],
             searching: false,
+        }))
+    }
+    pub fn better_setup(mode: BetterMode, current: Option<String>) -> Self {
+        Dialog::Better(Box::new(BetterDialog {
+            mode,
+            setup: true,
+            all: current.is_none(),
+            current,
+            hits: Vec::new(),
+            change: Vec::new(),
+            use_better: Vec::new(),
+        }))
+    }
+    /// Songs with a better version start ticked (in playlists the user may change).
+    pub fn better_results(mode: BetterMode, hits: Vec<BetterHit>) -> Self {
+        let change = hits.iter().map(|h| h.better.is_some() && h.playlist.owned).collect();
+        let use_better = hits.iter().map(|h| h.better.is_some()).collect();
+        Dialog::Better(Box::new(BetterDialog {
+            mode,
+            setup: false,
+            all: false,
+            current: None,
+            hits,
+            change,
+            use_better,
         }))
     }
     pub fn generate(norwegian: bool) -> Self {
@@ -604,7 +644,15 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         Dialog::Sort { pid, key, asc } => {
             let (esc, (ok, cancel)) = frame(ctx, "sort", tr.sort_permanently, |ui| {
                 ui.label(tr.sort_explain);
-                for k in [SortKey::Artist, SortKey::Title, SortKey::Album, SortKey::Duration, SortKey::Added] {
+                let keys = [
+                    SortKey::Artist,
+                    SortKey::Title,
+                    SortKey::Album,
+                    SortKey::Duration,
+                    SortKey::Added,
+                    SortKey::Popularity,
+                ];
+                for k in keys {
                     let r = ui.radio_value(key, k, i18n::sort_label(tr, k));
                     if first && k == SortKey::Artist {
                         r.request_focus();
@@ -664,6 +712,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         Dialog::Recommend(r) => recommend(app, ctx, r, first),
         Dialog::Generate(g) => generate(app, ctx, g, first),
         Dialog::Videos(v) => videos(app, ctx, v, first),
+        Dialog::Better(b) => better(app, ctx, b, first),
         Dialog::Duplicates { pid, mode, groups, remove, seen } => {
             // The list changed under the dialog (reload, undo): work the groups
             // out again, keeping the user's choices for rows that still exist.
@@ -1166,6 +1215,200 @@ fn videos(app: &mut App, ctx: &egui::Context, v: &mut VideosDialog, first: bool)
                 _ => {
                     entry.1.insert(it.item_id.clone());
                 }
+            }
+        }
+        for (pid, (swaps, removes)) in by_pid {
+            if !removes.is_empty() {
+                app.remove_from_playlist(&pid, &removes);
+            }
+            if !swaps.is_empty() {
+                app.snapshot(&pid);
+                let job = app.start_job(i18n::fmt(tr.replacing_n, &[&swaps.len().to_string()]), JobKind::Plain);
+                app.worker.send(Cmd::Replace { pid, swaps, job });
+            }
+        }
+    }
+    if ok || cancel || esc { Outcome::Close } else { Outcome::Keep }
+}
+
+fn quality_text(tr: &Tr, t: &Track, atmos: bool) -> &'static str {
+    match upgrade::quality(t, atmos) {
+        3 => tr.q_atmos,
+        2 => tr.q_hires,
+        1 => tr.q_lossless,
+        _ => tr.q_lossy,
+    }
+}
+
+/// «Upgrade sound quality» and «Clean versions»: choose playlists, then review
+/// the songs found and replace (or, for clean versions, remove) the ticked ones.
+fn better(app: &mut App, ctx: &egui::Context, b: &mut BetterDialog, first: bool) -> Outcome {
+    let tr = app.tr;
+    let (title, explain) = match b.mode {
+        BetterMode::Quality { .. } => (tr.upgrade_quality, tr.upgrade_explain),
+        BetterMode::Clean => (tr.clean_versions, tr.clean_explain),
+    };
+    if b.setup {
+        let cur_name = b.current.as_ref().and_then(|id| app.playlist(id)).map(|p| p.name.clone());
+        let (esc, (ok, cancel)) = frame(ctx, "better-setup", title, |ui| {
+            ui.label(explain);
+            if let Some(n) = &cur_name {
+                let r = ui.radio_value(&mut b.all, false, i18n::fmt(tr.only_playlist, &[n]));
+                if first {
+                    r.request_focus();
+                }
+            }
+            ui.radio_value(&mut b.all, true, i18n::fmt(tr.all_my_playlists, &[&app.playlists.len().to_string()]));
+            if let BetterMode::Quality { atmos } = &mut b.mode {
+                ui.checkbox(atmos, tr.prefer_atmos);
+            }
+            ok_cancel(ui, tr, tr.find, true)
+        });
+        if ok {
+            let playlists: Vec<Playlist> = if b.all || cur_name.is_none() {
+                app.playlists.clone()
+            } else {
+                app.playlists.iter().filter(|p| Some(&p.id) == b.current.as_ref()).cloned().collect()
+            };
+            let job = app.start_job(tr.looking_for_better, JobKind::Scan);
+            app.worker.send(Cmd::FindBetter { playlists, mode: b.mode, job });
+        }
+        return if ok || cancel || esc { Outcome::Close } else { Outcome::Keep };
+    }
+    let atmos = matches!(b.mode, BetterMode::Quality { atmos: true });
+    let clean = b.mode == BetterMode::Clean;
+    let mut open = None;
+    let mut play = None;
+    let (esc, (ok, cancel)) = frame(ctx, "better", title, |ui| {
+        if b.hits.is_empty() {
+            ui.label(if clean { tr.no_explicit } else { tr.no_better });
+            let c = ui.button(tr.close);
+            if first {
+                c.request_focus();
+            }
+            return (false, c.clicked());
+        }
+        let lists = b.hits.iter().map(|h| h.playlist.id.as_str()).collect::<HashSet<_>>().len();
+        let found = if clean { tr.explicit_found_n } else { tr.better_found_n };
+        ui.label(i18n::fmt(found, &[&b.hits.len().to_string(), &lists.to_string()]));
+        ui.label(if clean { tr.clean_tick_to_change } else { tr.better_tick_to_change });
+        ui.horizontal_wrapped(|ui| {
+            let all = ui.button(tr.select_all);
+            if first {
+                all.request_focus();
+            }
+            if all.clicked() {
+                for (c, h) in b.change.iter_mut().zip(&b.hits) {
+                    *c = h.playlist.owned;
+                }
+            }
+            if ui.button(tr.select_none).clicked() {
+                b.change.iter_mut().for_each(|c| *c = false);
+            }
+        });
+        egui::ScrollArea::vertical().max_height(ui.available_height() - 80.0).show(ui, |ui| {
+            let mut last = "";
+            for (n, h) in b.hits.iter().enumerate() {
+                let p = &h.playlist;
+                if p.id != last {
+                    ui.add_space(4.0);
+                    let head = if p.owned { p.name.clone() } else { format!("{} ({})", p.name, tr.not_yours) };
+                    ui.strong(head);
+                    last = &p.id;
+                }
+                ui.push_id(n, |ui| {
+                    ui.horizontal(|ui| {
+                        let desc = track_desc(tr, Some(&h.track), &h.track.id);
+                        let text = if clean { desc } else { format!("{desc} ({})", quality_text(tr, &h.track, atmos)) };
+                        let pb = ui.button("▶");
+                        pb.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{}: {text}", tr.play_preview))
+                        });
+                        if pb.on_hover_text(tr.play_preview).clicked() {
+                            play = Some(h.track.clone());
+                        }
+                        ui.add_enabled(p.owned, egui::Checkbox::new(&mut b.change[n], text));
+                    });
+                    match &h.better {
+                        Some(new) => {
+                            ui.indent("better", |ui| {
+                                ui.horizontal(|ui| {
+                                    // Album and quality tell this version apart from the one it replaces.
+                                    let mut desc = track_desc(tr, Some(new), &new.id);
+                                    if let Some(a) = new.album.as_deref().filter(|a| !a.is_empty()) {
+                                        desc.push_str(&format!(" ({a})"));
+                                    }
+                                    if !clean {
+                                        desc.push_str(&format!(" · {}", quality_text(tr, new, atmos)));
+                                    }
+                                    let pb = ui.button("▶");
+                                    pb.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::Role::Button,
+                                            true,
+                                            format!("{}: {desc}", tr.play_preview),
+                                        )
+                                    });
+                                    if pb.on_hover_text(tr.play_preview).clicked() {
+                                        play = Some(new.clone());
+                                    }
+                                    let ob = ui.button("↗");
+                                    ob.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::Role::Button,
+                                            true,
+                                            format!("{}: {desc}", tr.open_in_tidal),
+                                        )
+                                    });
+                                    if ob.on_hover_text(tr.open_in_tidal).clicked() {
+                                        open = Some(new.clone());
+                                    }
+                                    let text = format!("{} {desc}", tr.replace_with);
+                                    if clean {
+                                        ui.add_enabled(p.owned, egui::Checkbox::new(&mut b.use_better[n], text));
+                                    } else {
+                                        ui.label(text);
+                                    }
+                                });
+                            });
+                        }
+                        None => {
+                            ui.indent("better", |ui| ui.label(RichText::new(tr.no_clean_version).italics()));
+                        }
+                    }
+                });
+            }
+        });
+        let ticked = (0..b.hits.len()).filter(|&n| b.change[n]).count();
+        let swaps = (0..b.hits.len()).filter(|&n| b.change[n] && b.use_better[n] && b.hits[n].better.is_some()).count();
+        let label = if clean {
+            i18n::fmt(tr.replace_n_remove_m, &[&swaps.to_string(), &(ticked - swaps).to_string()])
+        } else {
+            i18n::fmt(tr.replace_n, &[&swaps.to_string()])
+        };
+        ok_cancel(ui, tr, &label, ticked > 0)
+    });
+    if let Some(t) = open {
+        app.open_in_tidal(t.app_url(), t.web_url());
+    }
+    if let Some(t) = play {
+        app.play(&t);
+    }
+    if ok {
+        // Per playlist: (old → new swaps, plain removals).
+        type Plan = (Vec<(PlaylistItem, Track)>, HashSet<String>);
+        let mut by_pid: HashMap<String, Plan> = HashMap::new();
+        for (n, h) in b.hits.iter().enumerate() {
+            if !b.change[n] || !h.playlist.owned {
+                continue;
+            }
+            let entry = by_pid.entry(h.playlist.id.clone()).or_default();
+            match &h.better {
+                Some(new) if b.use_better[n] => entry.0.push((h.item.clone(), new.clone())),
+                _ if clean => {
+                    entry.1.insert(h.item.item_id.clone());
+                }
+                _ => {}
             }
         }
         for (pid, (swaps, removes)) in by_pid {

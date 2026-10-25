@@ -16,6 +16,7 @@ use crate::ops::files::{ExportFormat, ImportPlaylist};
 use crate::ops::generate;
 use crate::ops::matcher::{self, MatchRow};
 use crate::ops::recommend::{self, Recommendation};
+use crate::ops::upgrade;
 use crate::player::{PlayerCmd, PlayerHandle, dash};
 use crate::spotify::{SpPlaylist, SpUser, SpotifyClient};
 
@@ -57,6 +58,23 @@ pub struct UnavailableHit {
     pub reason: Reason,
     /// Best known metadata (from the response or the local cache).
     pub known: Option<Track>,
+}
+
+/// What «better» means for [`Cmd::FindBetter`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BetterMode {
+    /// Higher sound quality of the same recording; `atmos` counts Dolby Atmos as best.
+    Quality { atmos: bool },
+    /// The clean version of an explicit song.
+    Clean,
+}
+
+#[derive(Clone, Debug)]
+pub struct BetterHit {
+    pub playlist: Playlist,
+    pub item: PlaylistItem,
+    pub track: Track,
+    pub better: Option<Track>,
 }
 
 pub enum Cmd {
@@ -166,6 +184,13 @@ pub enum Cmd {
     /// [`Event::MusicVersions`].
     FindMusic {
         videos: Vec<(String, Track)>,
+        job: Job,
+    },
+    /// Songs in `playlists` with a better version, reported as [`Event::Better`].
+    /// For [`BetterMode::Clean`] every explicit song is listed, found or not.
+    FindBetter {
+        playlists: Vec<Playlist>,
+        mode: BetterMode,
         job: Job,
     },
     /// Every video in `playlists`, reported as [`Event::Videos`].
@@ -322,6 +347,10 @@ pub enum Event {
     Unavailable(Vec<UnavailableHit>),
     /// (video item id, its audio track if found).
     MusicVersions(Vec<(String, Option<Track>)>),
+    Better {
+        mode: BetterMode,
+        hits: Vec<BetterHit>,
+    },
     /// (playlist, video) pairs, in playlist order.
     Videos(Vec<(Playlist, PlaylistItem)>),
     Recommendations {
@@ -638,6 +667,7 @@ async fn run_job(ctx: &Ctx, cmd: Cmd) {
         | Cmd::FindReplacements { job, .. }
         | Cmd::Recommend { job, .. }
         | Cmd::FindVideos { job, .. }
+        | Cmd::FindBetter { job, .. }
         | Cmd::FindMusic { job, .. }
         | Cmd::Generate { job, .. }
         | Cmd::Replace { job, .. }
@@ -912,6 +942,48 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
             ctx.emit(Event::Videos(found));
             Ok(None)
         }
+        Cmd::FindBetter { playlists, mode, .. } => {
+            let total = playlists.len();
+            let mut hits = Vec::new();
+            // A song in several playlists is looked up once.
+            let mut known: std::collections::HashMap<String, Option<Track>> = std::collections::HashMap::new();
+            for (n, p) in playlists.into_iter().enumerate() {
+                if cancel() {
+                    return Err(ApiError::Cancelled);
+                }
+                let items = c.playlist_items(&p.id, &cancel).await?;
+                ctx.emit(Event::Items { pid: p.id.clone(), items: items.clone() });
+                let todo: Vec<(PlaylistItem, Track)> = items
+                    .into_iter()
+                    .filter_map(|i| {
+                        let t = i.track.clone()?;
+                        let wanted = match mode {
+                            BetterMode::Quality { atmos } => t.isrc.is_some() && !upgrade::is_best(&t, atmos),
+                            BetterMode::Clean => t.explicit,
+                        };
+                        (wanted && t.kind == crate::api::ItemKind::Track && i.available()).then_some((i, t))
+                    })
+                    .collect();
+                let mut ask: Vec<Track> = todo.iter().map(|(_, t)| t.clone()).collect();
+                ask.retain(|t| !known.contains_key(&t.id));
+                ask.dedup_by(|a, b| a.id == b.id);
+                let progress = |d: usize, t: usize| {
+                    let done = (n * 1000 + d * 1000 / t.max(1)) / total.max(1);
+                    ctx.emit(Event::Permille { job: job.id, done });
+                };
+                let found = better_versions(&c, &ask, mode, job, &progress).await?;
+                known.extend(ask.into_iter().map(|t| t.id).zip(found));
+                for (item, track) in todo {
+                    let better = known.get(&track.id).cloned().flatten();
+                    if better.is_some() || mode == BetterMode::Clean {
+                        hits.push(BetterHit { playlist: p.clone(), item, track, better });
+                    }
+                }
+                ctx.emit(Event::Permille { job: job.id, done: (n + 1) * 1000 / total.max(1) });
+            }
+            ctx.emit(Event::Better { mode, hits });
+            Ok(None)
+        }
         Cmd::Recommend { pid, seeds, have, .. } => {
             let total = seeds.len();
             let mut lists = Vec::with_capacity(total);
@@ -1176,6 +1248,72 @@ async fn geo_check(
         return Err(ApiError::Cancelled);
     }
     Ok(blocked)
+}
+
+/// [`better_version`] for each of `tracks` (4 at a time), in the same order.
+async fn better_versions(
+    c: &Arc<Client>,
+    tracks: &[Track],
+    mode: BetterMode,
+    job: &Job,
+    progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<Vec<Option<Track>>, ApiError> {
+    let total = tracks.len();
+    let mut out = vec![None; total];
+    let mut pending = tracks.iter().cloned().enumerate();
+    let mut set = tokio::task::JoinSet::new();
+    let mut done = 0;
+    loop {
+        while set.len() < 4 && !job.cancelled() {
+            let Some((n, t)) = pending.next() else { break };
+            let c = c.clone();
+            set.spawn(async move { (n, better_version(&c, &t, mode).await) });
+        }
+        let Some(res) = set.join_next().await else { break };
+        let (n, r) = res.map_err(|e| ApiError::Other(e.to_string()))?;
+        out[n] = r?;
+        done += 1;
+        progress(done, total);
+    }
+    if job.cancelled() {
+        return Err(ApiError::Cancelled);
+    }
+    Ok(out)
+}
+
+/// A better version of `t`: for quality, another release of the same
+/// recording (same ISRC); for a clean version, by ISRC and then by search.
+/// A lookup TIDAL refuses (an HTTP error) just finds nothing.
+async fn better_version(c: &Client, t: &Track, mode: BetterMode) -> Result<Option<Track>, ApiError> {
+    let soft = |r: Result<Vec<Track>, ApiError>| match r {
+        Err(e) if e.status().is_some() => {
+            tracing::debug!("better version of {}: {e}", t.id);
+            Ok(Vec::new())
+        }
+        other => other,
+    };
+    let by_isrc = match &t.isrc {
+        Some(isrc) => soft(c.tracks_by_isrc(isrc).await)?,
+        None => Vec::new(),
+    };
+    match mode {
+        BetterMode::Quality { atmos } => Ok(upgrade::better_quality(t, by_isrc, atmos)),
+        BetterMode::Clean => {
+            if let Some(b) = upgrade::clean_version(t, by_isrc) {
+                return Ok(Some(b));
+            }
+            // TIDAL's search is sensitive to word order: try artist first, then title first.
+            let text = matcher::search_text(&upgrade::row_of(t));
+            let title_first = format!("{} {}", t.title, t.artists.first().map(String::as_str).unwrap_or(""));
+            for q in [text.clone(), title_first.trim().to_owned(), format!("{text} clean")] {
+                let found = soft(c.search(&q).await.map(|r| r.tracks))?;
+                if let Some(b) = upgrade::clean_version(t, found) {
+                    return Ok(Some(b));
+                }
+            }
+            Ok(None)
+        }
+    }
 }
 
 /// The same song as `known`, playable: by ISRC first, then by search.

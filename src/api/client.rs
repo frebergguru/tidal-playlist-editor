@@ -174,11 +174,25 @@ impl Client {
 
     /// Follows `links.next` until exhausted; returns all primary data in one doc.
     pub async fn get_all(&self, path: &str, query: &Query, cancel: &(dyn Fn() -> bool + Sync)) -> Result<Doc> {
+        self.get_pages(path, query, usize::MAX, cancel).await
+    }
+
+    /// Like [`Self::get_all`], but stops after `max_pages` pages (for lookups
+    /// where the first results are enough).
+    async fn get_pages(
+        &self,
+        path: &str,
+        query: &Query,
+        max_pages: usize,
+        cancel: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Doc> {
         let mut doc = self.get(path, query).await?;
         let mut all = std::mem::take(&mut doc.data).as_array().cloned().unwrap_or_default();
         let mut next = doc.next.take();
         let mut seen = HashSet::new();
-        while let Some(n) = next {
+        let mut pages = 1;
+        while let Some(n) = next.filter(|_| pages < max_pages) {
+            pages += 1;
             if cancel() {
                 return Err(ApiError::Cancelled);
             }
@@ -204,13 +218,24 @@ impl Client {
         includes: &[&str],
         cancel: &(dyn Fn() -> bool + Sync),
     ) -> Result<Doc> {
+        self.get_pages_with_includes(path, base, includes, usize::MAX, cancel).await
+    }
+
+    async fn get_pages_with_includes(
+        &self,
+        path: &str,
+        base: &Query,
+        includes: &[&str],
+        max_pages: usize,
+        cancel: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Doc> {
         let mut last = None;
         for inc in includes {
             let mut query = base.clone();
             if !inc.is_empty() {
                 query.push(("include".into(), (*inc).into()));
             }
-            match self.get_all(path, &query, cancel).await {
+            match self.get_pages(path, &query, max_pages, cancel).await {
                 Err(e) if e.status() == Some(400) => {
                     tracing::debug!("include {inc:?} rejected on {path}: {e}");
                     last = Some(e);
@@ -451,9 +476,11 @@ impl Client {
         Ok(out)
     }
 
+    /// Every release of the recording `isrc` (up to 100). One ISRC per call:
+    /// with several, TIDAL returns only one track for each.
     pub async fn tracks_by_isrc(&self, isrc: &str) -> Result<Vec<Track>> {
         let query = vec![("filter[isrc]".to_owned(), isrc.to_owned()), self.cc()];
-        let doc = self.get_all_with_includes("/tracks", &query, &["artists,albums", "artists"], &|| false).await?;
+        let doc = self.get_pages_with_includes("/tracks", &query, &["artists,albums", "artists"], 5, &|| false).await?;
         Ok(doc.data_array().iter().filter_map(|r| jsonapi::track_from(r, &doc)).collect())
     }
 

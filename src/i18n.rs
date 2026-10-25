@@ -58,6 +58,7 @@ pub fn sort_label(tr: &Tr, k: SortKey) -> &'static str {
         SortKey::Album => tr.col_album,
         SortKey::Duration => tr.col_time,
         SortKey::Added => tr.col_added,
+        SortKey::Popularity => tr.popularity,
     }
 }
 
@@ -170,6 +171,26 @@ strings! {
     find_unavailable_dots => "Find unavailable songs…", "Finn utilgjengelige sanger …";
     find_unavailable => "Find unavailable songs", "Finn utilgjengelige sanger";
     find_duplicates_dots => "Find duplicates…", "Finn duplikater …";
+    upgrade_quality_dots => "Upgrade sound quality…", "Oppgrader lydkvalitet …";
+    upgrade_quality => "Upgrade sound quality", "Oppgrader lydkvalitet";
+    upgrade_explain => "Looks for other releases of the same recordings in better sound quality (Hi-Res or lossless). Only the very same recording (same ISRC) is offered. Nothing changes until you confirm.", "Leter etter andre utgivelser av de samme innspillingene i bedre lydkvalitet (Hi-Res eller tapsfri). Bare nøyaktig samme innspilling (samme ISRC) blir foreslått. Ingenting endres før du bekrefter.";
+    prefer_atmos => "Count Dolby Atmos as the best quality", "Regn Dolby Atmos som beste kvalitet";
+    clean_versions_dots => "Clean versions…", "Ikke-eksplisitte versjoner …";
+    clean_versions => "Clean versions", "Ikke-eksplisitte versjoner";
+    clean_explain => "Lists the songs marked explicit and looks for a clean version of each. You choose which to swap or remove; nothing changes until you confirm.", "Viser sangene som er merket eksplisitte, og leter etter en ikke-eksplisitt versjon av hver. Du velger hvilke som byttes eller fjernes; ingenting endres før du bekrefter.";
+    looking_for_better => "Looking for better versions", "Leter etter bedre versjoner";
+    better_found_n => "{0} songs in {1} playlists can sound better.", "{0} sanger i {1} spillelister kan låte bedre.";
+    better_tick_to_change => "Ticked songs are replaced in place by the better version.", "Avkryssede sanger byttes ut på samme plass med den bedre versjonen.";
+    no_better => "No better versions found.", "Fant ingen bedre versjoner.";
+    explicit_found_n => "{0} explicit songs in {1} playlists.", "{0} eksplisitte sanger i {1} spillelister.";
+    no_explicit => "No explicit songs found.", "Fant ingen eksplisitte sanger.";
+    clean_tick_to_change => "Ticked songs are replaced in place by their clean version, or removed when none was found.", "Avkryssede sanger byttes ut på samme plass med den ikke-eksplisitte versjonen, eller fjernes hvis ingen ble funnet.";
+    no_clean_version => "No clean version found.", "Fant ingen ikke-eksplisitt versjon.";
+    replace_n => "Replace {0}", "Erstatt {0}";
+    q_lossy => "Lossy", "Komprimert med tap";
+    q_lossless => "Lossless", "Tapsfri";
+    q_hires => "Hi-Res lossless", "Hi-Res tapsfri";
+    q_atmos => "Dolby Atmos", "Dolby Atmos";
     find_videos_dots => "Find videos…", "Finn videoer …";
     find_videos => "Find videos", "Finn videoer";
     videos_explain => "Lists the music videos in your playlists. Nothing is removed until you confirm.", "Viser musikkvideoene i spillelistene dine. Ingenting fjernes før du bekrefter.";
@@ -233,6 +254,9 @@ strings! {
     loading => "Loading…", "Laster …";
     no_playlists_yet => "You have no playlists yet. Make one with «New».", "Du har ingen spillelister ennå. Lag en med «Ny».";
     n_items => "{0} items", "{0} elementer";
+    n_songs => "{0} songs", "{0} sanger";
+    n_songs_m_videos => "{0} songs, {1} videos", "{0} sanger, {1} videoer";
+    popularity => "Popularity", "Popularitet";
     collaborator => "shared with you", "delt med deg";
     select_a_playlist => "Choose a playlist on the left.", "Velg en spilleliste til venstre.";
     n_unavailable => "{0} unavailable", "{0} utilgjengelige";

@@ -201,6 +201,8 @@ pub enum SortKey {
     Album,
     Duration,
     Added,
+    /// TIDAL's popularity score; for the permanent sort only (not a column).
+    Popularity,
 }
 
 pub fn sorted(items: &[PlaylistItem], key: SortKey, ascending: bool) -> Vec<PlaylistItem> {
@@ -220,6 +222,10 @@ pub fn sorted(items: &[PlaylistItem], key: SortKey, ascending: bool) -> Vec<Play
                 a.track.as_ref().map_or(0, |t| t.duration_secs).cmp(&b.track.as_ref().map_or(0, |t| t.duration_secs))
             }
             SortKey::Added => a.added_at.cmp(&b.added_at),
+            SortKey::Popularity => {
+                let p = |it: &PlaylistItem| it.track.as_ref().and_then(|t| t.popularity).unwrap_or(-1.0);
+                p(a).total_cmp(&p(b))
+            }
         };
         if ascending { o } else { o.reverse() }
     });
@@ -371,6 +377,12 @@ mod tests {
         assert_eq!(s.iter().map(|i| i.r.id.as_str()).collect::<Vec<_>>(), vec!["2", "1", "3"]);
         let s = sorted(&items, SortKey::Added, false);
         assert_eq!(s[0].r.id, "3");
+        let mut pop = items.clone();
+        for (it, p) in pop.iter_mut().zip([Some(0.2), None, Some(0.9)]) {
+            it.track.as_mut().unwrap().popularity = p;
+        }
+        let s = sorted(&pop, SortKey::Popularity, false);
+        assert_eq!(s.iter().map(|i| i.r.id.as_str()).collect::<Vec<_>>(), vec!["3", "1", "2"], "unknown last");
         let mut sh: Vec<String> = shuffled(&items).into_iter().map(|i| i.r.id).collect();
         sh.sort();
         assert_eq!(sh, vec!["1", "2", "3"]);

@@ -106,6 +106,11 @@ pub fn track_from(res: &Value, doc: &Doc) -> Option<Track> {
         album,
         album_id: album_link.map(|(_, id)| id),
         availability,
+        media_tags: attr(res, "mediaTags")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+            .unwrap_or_default(),
+        popularity: attr(res, "popularity").and_then(Value::as_f64).map(|p| p as f32),
     })
 }
 
@@ -116,6 +121,8 @@ pub fn playlist_from(res: &Value) -> Option<Playlist> {
         description: attr_str(res, "description").unwrap_or_default(),
         access_type: AccessType::from_api(&attr_str(res, "accessType").unwrap_or_default()),
         number_of_items: attr_u32(res, "numberOfItems"),
+        number_of_tracks: attr_u32(res, "numberOfTrackItems"),
+        number_of_videos: attr_u32(res, "numberOfVideoItems"),
         duration_secs: attr_str(res, "duration").map(|d| parse_iso_duration(&d)),
         last_modified: attr_str(res, "lastModifiedAt"),
         created: attr_str(res, "createdAt"),
@@ -202,7 +209,7 @@ mod tests {
             ],
             "included": [
                 {"id": "1", "type": "tracks", "attributes": {"title": "One", "isrc": "X1", "duration": "PT3M", "explicit": true,
-                    "availability": ["STREAM"]},
+                    "availability": ["STREAM"], "mediaTags": ["HIRES_LOSSLESS", "LOSSLESS"], "popularity": 0.5},
                  "relationships": {"artists": {"data": [{"id": "10", "type": "artists"}]},
                                    "albums": {"data": [{"id": "20", "type": "albums"}]}}},
                 {"id": "10", "type": "artists", "attributes": {"name": "Band"}},
@@ -218,6 +225,7 @@ mod tests {
         let t = items[0].track.as_ref().unwrap();
         assert_eq!((t.title.as_str(), t.artists[0].as_str(), t.album.as_deref()), ("One", "Band", Some("Record")));
         assert_eq!(t.duration_secs, 180);
+        assert_eq!((t.media_tags.len(), t.popularity), (2, Some(0.5)));
         assert!(items[0].available());
         assert!(items[1].track.is_none() && !items[1].available());
         assert_eq!(items[1].replacement.as_deref(), Some("REPLACED"));

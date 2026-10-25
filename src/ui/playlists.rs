@@ -50,8 +50,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical().id_salt("pl-scroll").auto_shrink([false, false]).show(ui, |ui| {
         for p in &list {
             let selected = app.current.as_deref() == Some(&p.id);
-            let count = p.number_of_items.map(|n| n.to_string()).unwrap_or_else(|| "…".into());
-            let mut detail = i18n::fmt(tr.n_items, &[&count]);
+            let mut detail = match (p.number_of_tracks, p.number_of_videos) {
+                (Some(t), Some(v)) if v > 0 => i18n::fmt(tr.n_songs_m_videos, &[&t.to_string(), &v.to_string()]),
+                (Some(t), _) => i18n::fmt(tr.n_songs, &[&t.to_string()]),
+                _ => {
+                    let count = p.number_of_items.map(|n| n.to_string()).unwrap_or_else(|| "…".into());
+                    i18n::fmt(tr.n_items, &[&count])
+                }
+            };
             if let Some(d) = p.duration_secs.filter(|d| *d > 0) {
                 detail.push_str(&format!(" · {}", format_duration(d)));
             }

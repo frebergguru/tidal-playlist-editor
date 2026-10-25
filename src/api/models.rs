@@ -66,6 +66,12 @@ pub struct Track {
     /// Deprecated `availability` attribute (STREAM, DJ, STEM). `None` = not reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub availability: Option<Vec<String>>,
+    /// Sound quality tags such as `LOSSLESS`, `HIRES_LOSSLESS`, `DOLBY_ATMOS`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media_tags: Vec<String>,
+    /// TIDAL's popularity score, 0–1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub popularity: Option<f32>,
 }
 
 fn default_kind() -> ItemKind {
@@ -169,6 +175,10 @@ pub struct Playlist {
     pub access_type: AccessType,
     #[serde(default)]
     pub number_of_items: Option<u32>,
+    #[serde(default)]
+    pub number_of_tracks: Option<u32>,
+    #[serde(default)]
+    pub number_of_videos: Option<u32>,
     #[serde(default)]
     pub duration_secs: Option<u32>,
     #[serde(default)]

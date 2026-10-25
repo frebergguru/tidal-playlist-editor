@@ -651,3 +651,90 @@ fn videos_can_be_swapped_for_their_song() {
     wait_for_log(&mut h, "Replacing 1");
     assert_eq!(h.state().undo["p1"].len(), 1, "undoable");
 }
+
+fn better_hit(app: &App, n: usize, tags: &[&str], explicit: bool, better: Option<Track>) -> crate::worker::BetterHit {
+    let item = app.items["p1"][n].clone();
+    let mut track = item.track.clone().unwrap();
+    track.media_tags = tags.iter().map(|s| (*s).to_owned()).collect();
+    track.explicit = explicit;
+    crate::worker::BetterHit { playlist: app.playlists[0].clone(), item, track, better }
+}
+
+#[test]
+fn better_sound_is_listed_with_its_quality_and_swapped() {
+    let mut h = harness();
+    logged_in(&mut h);
+    {
+        let app = h.state_mut();
+        let hires = Track {
+            id: "700".into(),
+            title: "First song".into(),
+            artists: vec!["Artist".into()],
+            album: Some("Deluxe".into()),
+            media_tags: vec!["HIRES_LOSSLESS".into(), "LOSSLESS".into()],
+            ..Default::default()
+        };
+        let hit = better_hit(app, 0, &["LOSSLESS"], false, Some(hires));
+        let mode = crate::worker::BetterMode::Quality { atmos: false };
+        app.open_dialog(super::Dialog::better_results(mode, vec![hit]));
+    }
+    h.run();
+    h.get_by_label("1 songs in 1 playlists can sound better.");
+    // The quality is written out, not only shown by an icon or colour.
+    h.get_by_role_and_label(Role::CheckBox, "First song — Artist (Lossless)");
+    h.get_by_label("Replace with First song — Artist (Deluxe) · Hi-Res lossless");
+    h.get_by_label("Play preview: First song — Artist (Lossless)");
+    h.get_by_label("Play preview: First song — Artist (Deluxe) · Hi-Res lossless");
+    h.get_by_label("Open in TIDAL: First song — Artist (Deluxe) · Hi-Res lossless");
+    h.get_by_label("Replace 1").click();
+    h.run();
+    assert!(h.state().dialog.is_none());
+    wait_for_log(&mut h, "Replacing 1");
+    assert_eq!(h.state().undo["p1"].len(), 1, "undoable");
+}
+
+#[test]
+fn explicit_songs_are_swapped_or_removed() {
+    let mut h = harness();
+    logged_in(&mut h);
+    {
+        let app = h.state_mut();
+        let clean = Track {
+            id: "800".into(),
+            title: "First song".into(),
+            artists: vec!["Artist".into()],
+            ..Default::default()
+        };
+        let hits = vec![better_hit(app, 0, &[], true, Some(clean)), better_hit(app, 1, &[], true, None)];
+        app.open_dialog(super::Dialog::better_results(crate::worker::BetterMode::Clean, hits));
+    }
+    h.run();
+    h.get_by_label("2 explicit songs in 1 playlists.");
+    h.get_by_label("No clean version found.");
+    // Only the song with a clean version starts ticked; tick the other to remove it.
+    h.get_by_label("Replace 1, remove 0");
+    h.get_by_role_and_label(Role::CheckBox, "Second song — Artist").click();
+    h.run();
+    h.get_by_label("Replace 1, remove 1").click();
+    h.run();
+    assert!(h.state().dialog.is_none());
+    assert!(!h.state().items["p1"].iter().any(|i| i.item_id == "occ2"), "removed");
+    wait_for_log(&mut h, "Replacing 1");
+}
+
+#[test]
+fn better_setup_offers_atmos_only_for_sound_quality() {
+    let mut h = harness();
+    logged_in(&mut h);
+    let mode = crate::worker::BetterMode::Quality { atmos: false };
+    h.state_mut().open_dialog(super::Dialog::better_setup(mode, Some("p1".into())));
+    h.run();
+    assert!(h.get_by_label("Only «Road trip»").accesskit_node().is_focused());
+    h.get_by_role_and_label(Role::CheckBox, "Count Dolby Atmos as the best quality");
+    h.key_press(Key::Escape);
+    h.run();
+    assert!(h.state().dialog.is_none());
+    h.state_mut().open_dialog(super::Dialog::better_setup(crate::worker::BetterMode::Clean, None));
+    h.run();
+    assert_eq!(h.query_all_by_label("Count Dolby Atmos as the best quality").count(), 0);
+}

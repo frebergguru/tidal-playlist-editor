@@ -22,7 +22,7 @@ use crate::ops::recommend::{self, Recommendation};
 use crate::player::{PlayerCmd, PlayerHandle};
 use crate::spotify::{SpPlaylist, SpUser};
 use crate::store::{Config, OpenIn, Paths, TrackCache};
-use crate::worker::{Cmd, Event, Job, JobId, Note, PreviewFail, WorkerHandle};
+use crate::worker::{BetterMode, Cmd, Event, Job, JobId, Note, PreviewFail, WorkerHandle};
 
 pub use dialogs::Dialog;
 
@@ -317,7 +317,11 @@ impl App {
         let replaceable = matches!(
             self.dialog,
             None | Some(
-                Dialog::Unavailable(_) | Dialog::Recommend(_) | Dialog::Videos(_) | Dialog::ImportReview { .. }
+                Dialog::Unavailable(_)
+                    | Dialog::Recommend(_)
+                    | Dialog::Videos(_)
+                    | Dialog::Better(_)
+                    | Dialog::ImportReview { .. }
             ) | Some(Dialog::FromSpotify { .. } | Dialog::ToSpotify { .. })
         );
         if replaceable {
@@ -534,7 +538,10 @@ impl App {
                     v.clamp(items.len());
                 }
                 if let Some(p) = self.playlists.iter_mut().find(|p| p.id == pid) {
+                    let videos = items.iter().filter(|i| i.r.kind == crate::api::ItemKind::Video).count() as u32;
                     p.number_of_items = Some(items.len() as u32);
+                    p.number_of_videos = Some(videos);
+                    p.number_of_tracks = Some(items.len() as u32 - videos);
                 }
                 self.items.insert(pid, items);
             }
@@ -648,6 +655,7 @@ impl App {
                 self.open_result(Dialog::unavailable_results(hits));
             }
             Event::Videos(hits) => self.open_result(Dialog::videos_results(hits)),
+            Event::Better { mode, hits } => self.open_result(Dialog::better_results(mode, hits)),
             Event::MusicVersions(found) => {
                 if let Some(Dialog::Videos(v)) = &mut self.dialog {
                     v.set_music(found);
@@ -942,6 +950,13 @@ impl App {
                 {
                     let rows = self.views.get(&p.id).map(|v| v.selected.clone()).unwrap_or_default();
                     self.recommend(&p.id, rows, &[]);
+                }
+                if ui.add_enabled(logged_in, egui::Button::new(tr.upgrade_quality_dots)).clicked() {
+                    let mode = BetterMode::Quality { atmos: false };
+                    self.open_dialog(Dialog::better_setup(mode, self.current.clone()));
+                }
+                if ui.add_enabled(logged_in, egui::Button::new(tr.clean_versions_dots)).clicked() {
+                    self.open_dialog(Dialog::better_setup(BetterMode::Clean, self.current.clone()));
                 }
                 if ui.add_enabled(logged_in, egui::Button::new(tr.find_videos_dots)).clicked() {
                     self.open_dialog(Dialog::videos_setup(self.current.clone()));
