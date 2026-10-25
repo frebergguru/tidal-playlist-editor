@@ -15,7 +15,7 @@ use std::sync::Arc;
 use egui::{Key, KeyboardShortcut, Modifiers};
 
 use crate::api::auth::AuthConfig;
-use crate::api::{Album, Artist, ItemRef, Playlist, PlaylistItem, SearchResults, Track, User};
+use crate::api::{Album, Artist, ItemRef, Playlist, PlaylistItem, RadioSeed, SearchResults, Track, User};
 use crate::i18n::{self, Tr};
 use crate::ops::analysis::SortKey;
 use crate::ops::recommend::{self, Recommendation};
@@ -416,6 +416,19 @@ impl App {
         self.recommend_rows.insert(pid.to_owned(), rows);
         let job = self.start_job(self.tr.finding_recommendations, JobKind::Recommend);
         self.worker.send(Cmd::Recommend { pid: pid.to_owned(), seeds, have, job });
+    }
+
+    /// Saves TIDAL's radio for a song or artist (`what` names it) as a new playlist.
+    pub fn save_radio(&mut self, seed: RadioSeed, what: &str) {
+        let tr = self.tr;
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let job = self.start_job(i18n::fmt(tr.making_radio, &[what]), JobKind::Plain);
+        self.worker.send(Cmd::SaveRadio {
+            seed,
+            name: i18n::fmt(tr.radio_name, &[what]),
+            description: i18n::fmt(tr.radio_description, &[what, &today]),
+            job,
+        });
     }
 
     /// Adds tracks to a playlist (with undo snapshot and optimistic job entry).

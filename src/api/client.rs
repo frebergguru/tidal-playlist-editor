@@ -629,6 +629,20 @@ impl Client {
         Ok(Vec::new())
     }
 
+    /// The id of TIDAL's radio (a mix playlist) for a track or an artist;
+    /// `None` when TIDAL has none.
+    pub async fn radio(&self, seed: &RadioSeed) -> Result<Option<String>> {
+        let path = match seed {
+            RadioSeed::Track(id) => format!("/tracks/{id}/relationships/radio"),
+            RadioSeed::Artist(id) => format!("/artists/{id}/relationships/radio"),
+        };
+        match self.get(&path, &vec![self.cc()]).await {
+            Ok(doc) => Ok(doc.data_array().first().and_then(|l| jsonapi::str_of(l, "id"))),
+            Err(e) if e.status() == Some(404) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     // --------------------------------------------------------------- genres
 
     /// Playlists (mostly TIDAL's own) found by a search, best match first.
@@ -1028,6 +1042,33 @@ mod tests {
         assert!(c.playback_restriction("flaky").await.is_err(), "other errors are reported, not hidden");
         let e = c.track_manifest("geo").await.unwrap_err();
         assert_eq!(e.code(), Some("GEO_RESTRICTED"));
+    }
+
+    #[tokio::test]
+    async fn radio_is_a_mix_playlist() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v2/tracks/1/relationships/radio"))
+            .and(query_param("countryCode", "NO"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"data": [{"type": "playlists", "id": "mix1"}]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/artists/9/relationships/radio"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/tracks/gone/relationships/radio"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let c = client(&server, far());
+        assert_eq!(c.radio(&RadioSeed::Track("1".into())).await.unwrap().as_deref(), Some("mix1"));
+        assert_eq!(c.radio(&RadioSeed::Artist("9".into())).await.unwrap(), None);
+        assert_eq!(c.radio(&RadioSeed::Track("gone".into())).await.unwrap(), None);
     }
 
     #[tokio::test]

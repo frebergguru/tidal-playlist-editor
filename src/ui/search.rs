@@ -22,6 +22,7 @@ enum Act {
     Toggle(String),
     SelectAll(Vec<String>),
     Fav(Vec<String>),
+    Radio(Artist),
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
@@ -86,6 +87,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 acts.push(Act::Back);
             }
             ui.strong(&artist.name);
+            if ui.button(tr.artist_radio_playlist).clicked() {
+                acts.push(Act::Radio(artist.clone()));
+            }
             egui::ScrollArea::vertical().id_salt("artist-scroll").auto_shrink([false, false]).show(ui, |ui| {
                 ui.label(RichText::new(tr.top_tracks).strong());
                 track_rows(ui, tr, tracks, &in_playlist, &selected, has_target, &mut acts);
@@ -191,6 +195,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 app.search.busy = true;
                 app.worker.send(Cmd::ArtistDetails(ar));
             }
+            Act::Radio(a) => app.save_radio(crate::api::RadioSeed::Artist(a.id), &a.name),
             Act::Back => {
                 app.search.view = SearchView::Results;
                 app.search.selected.clear();

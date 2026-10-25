@@ -25,6 +25,7 @@ enum RowAction {
     Favourite(Vec<String>),
     Similar(HashSet<String>),
     CopyLink(usize),
+    Radio(usize),
 }
 
 /// Indices into the playlist that are shown, after find filter and view sort.
@@ -557,6 +558,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         if ui.button(tr.similar_songs_dots).clicked() {
                             actions.push(RowAction::Similar(ids.clone()));
                         }
+                        if it.r.kind == crate::api::ItemKind::Track
+                            && it.track.is_some()
+                            && ui.button(tr.song_radio_playlist).clicked()
+                        {
+                            actions.push(RowAction::Radio(idx));
+                        }
                         if ui.button(tr.remove).clicked() {
                             actions.push(RowAction::Remove(ids));
                         }
@@ -588,7 +595,8 @@ fn run_action(app: &mut App, pid: &str, a: RowAction, vis: &[usize]) {
         | RowAction::Focus(idx)
         | RowAction::Play(idx)
         | RowAction::Open(idx)
-        | RowAction::CopyLink(idx) => Some(*idx),
+        | RowAction::CopyLink(idx)
+        | RowAction::Radio(idx) => Some(*idx),
         RowAction::DropBefore { before, .. } => Some(*before),
         _ => None,
     };
@@ -680,6 +688,11 @@ fn run_action(app: &mut App, pid: &str, a: RowAction, vis: &[usize]) {
         }
         RowAction::Favourite(ids) => app.worker.send(Cmd::Favourite { ids, add: true }),
         RowAction::Similar(ids) => app.recommend(pid, ids, &[]),
+        RowAction::Radio(idx) => {
+            if let Some(t) = app.track_meta(&items[idx]) {
+                app.save_radio(crate::api::RadioSeed::Track(t.id.clone()), &t.full_title());
+            }
+        }
     }
 }
 

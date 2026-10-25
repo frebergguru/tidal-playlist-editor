@@ -9,7 +9,8 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::api::auth::{self, AuthConfig};
 use crate::api::{
-    AccessType, Album, ApiError, Artist, Client, Genre, ItemRef, Playlist, PlaylistItem, SearchResults, Track, User,
+    AccessType, Album, ApiError, Artist, Client, Genre, ItemRef, Playlist, PlaylistItem, RadioSeed, SearchResults,
+    Track, User,
 };
 use crate::ops::analysis;
 use crate::ops::files::{ExportFormat, ImportPlaylist};
@@ -191,6 +192,13 @@ pub enum Cmd {
     FindBetter {
         playlists: Vec<Playlist>,
         mode: BetterMode,
+        job: Job,
+    },
+    /// A new playlist `name` with the songs of TIDAL's radio for `seed`.
+    SaveRadio {
+        seed: RadioSeed,
+        name: String,
+        description: String,
         job: Job,
     },
     /// Every video in `playlists`, reported as [`Event::Videos`].
@@ -668,6 +676,7 @@ async fn run_job(ctx: &Ctx, cmd: Cmd) {
         | Cmd::Recommend { job, .. }
         | Cmd::FindVideos { job, .. }
         | Cmd::FindBetter { job, .. }
+        | Cmd::SaveRadio { job, .. }
         | Cmd::FindMusic { job, .. }
         | Cmd::Generate { job, .. }
         | Cmd::Replace { job, .. }
@@ -983,6 +992,23 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
             }
             ctx.emit(Event::Better { mode, hits });
             Ok(None)
+        }
+        Cmd::SaveRadio { seed, name, description, .. } => {
+            let tr = crate::i18n::current();
+            let mix = c.radio(&seed).await?.ok_or_else(|| ApiError::Other(tr.err_no_radio.into()))?;
+            let items = c.playlist_items(&mix, &cancel).await?;
+            let refs: Vec<ItemRef> = items.iter().filter(|i| i.available()).map(|i| i.r.clone()).collect();
+            if refs.is_empty() {
+                return Err(ApiError::Other(tr.err_no_radio.into()));
+            }
+            let _g = ctx.write_lock.lock().await;
+            let p = c.create_playlist(&name, &description, AccessType::Unlisted).await?;
+            ctx.emit(Event::PlaylistCreated(p.clone()));
+            let r = c.add_items(&p.id, &refs, None, false, &ctx.progress(job, refs.len()), &cancel).await;
+            refresh_meta(ctx, &c, &p.id).await;
+            reload(ctx, &p.id).await;
+            r?;
+            Ok(Some(Note::Created(name)))
         }
         Cmd::Recommend { pid, seeds, have, .. } => {
             let total = seeds.len();

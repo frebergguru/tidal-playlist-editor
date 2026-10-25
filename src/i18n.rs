@@ -191,6 +191,12 @@ strings! {
     q_lossless => "Lossless", "Tapsfri";
     q_hires => "Hi-Res lossless", "Hi-Res tapsfri";
     q_atmos => "Dolby Atmos", "Dolby Atmos";
+    song_radio_playlist => "Make a playlist from this song's radio", "Lag spilleliste av radioen til denne sangen";
+    artist_radio_playlist => "Make a playlist from the artist's radio", "Lag spilleliste av radioen til artisten";
+    radio_name => "Radio: {0}", "Radio: {0}";
+    radio_description => "TIDAL's radio for {0}, saved {1}.", "TIDAL-radioen for {0}, lagret {1}.";
+    making_radio => "Making a playlist from the radio for {0}", "Lager spilleliste av radioen for {0}";
+    err_no_radio => "TIDAL has no radio for this.", "TIDAL har ingen radio for dette.";
     find_videos_dots => "Find videos…", "Finn videoer …";
     find_videos => "Find videos", "Finn videoer";
     videos_explain => "Lists the music videos in your playlists. Nothing is removed until you confirm.", "Viser musikkvideoene i spillelistene dine. Ingenting fjernes før du bekrefter.";

@@ -24,6 +24,7 @@ with your own TIDAL account through your own developer app.
 - **Videos:** videos are marked "🎬 Video" in the song list, and Tools → "Find videos…" lists every video in one or all playlists, with "Open in TIDAL". "Find music versions" looks up each video's song on TIDAL; you check the suggestions (with a preview), and the ticked videos are replaced by their song in the same place, or removed.
 - **Sound quality:** Tools → "Upgrade sound quality…" finds other releases of the same recordings (same ISRC) in better quality — Hi-Res or lossless, optionally Dolby Atmos — and swaps the ticked songs in place. The quality is written next to each song.
 - **Clean versions:** Tools → "Clean versions…" lists the explicit songs and looks for a clean version of each; ticked songs are swapped in place, or removed when there is none.
+- **Radio:** right-click a song → "Make a playlist from this song's radio", or open an artist in the search panel → "Make a playlist from the artist's radio", saves TIDAL's radio mix as a new playlist that keeps the songs after the mix changes.
 - **Duplicates:** find songs with the same TIDAL id, the same recording (ISRC), or the same artist and title.
 - **Export:** JSON (full detail), CSV, M3U8 and XSPF, for one, several or all playlists.
 - **Backup and restore:** "Back up all playlists" writes a timestamped folder. A restore compares a backup with the current playlist, shows what differs, and puts the songs and their order back.
@@ -143,6 +144,7 @@ TIDAL-konto via din egen utviklerapp.
 - **Videoer:** videoer er merket «🎬 Video» i sanglisten, og Verktøy → «Finn videoer …» viser alle videoene i én eller alle spillelister, med «Åpne i TIDAL». «Finn musikkversjoner» slår opp sangen til hver video i TIDAL; du sjekker forslagene (med smakebit), og de avkryssede videoene byttes ut med sangen på samme plass, eller fjernes.
 - **Lydkvalitet:** Verktøy → «Oppgrader lydkvalitet …» finner andre utgivelser av de samme innspillingene (samme ISRC) i bedre kvalitet – Hi-Res eller tapsfri, eventuelt Dolby Atmos – og bytter ut de avkryssede sangene på samme plass. Kvaliteten står skrevet ved hver sang.
 - **Ikke-eksplisitte versjoner:** Verktøy → «Ikke-eksplisitte versjoner …» viser de eksplisitte sangene og leter etter en ikke-eksplisitt versjon av hver; avkryssede sanger byttes ut på samme plass, eller fjernes hvis det ikke finnes noen.
+- **Radio:** høyreklikk en sang → «Lag spilleliste av radioen til denne sangen», eller åpne en artist i søkepanelet → «Lag spilleliste av radioen til artisten», lagrer TIDAL-radiomiksen som en ny spilleliste som beholder sangene når miksen endrer seg.
 - **Duplikater:** finn sanger med samme TIDAL-id, samme innspilling (ISRC) eller samme artist og tittel.
 - **Eksport:** JSON (alle detaljer), CSV, M3U8 og XSPF, for én, flere eller alle spillelister.
 - **Sikkerhetskopi og gjenoppretting:** «Sikkerhetskopier alle spillelister» lager en mappe med tidsstempel. Ved gjenoppretting sammenlignes sikkerhetskopien med spillelisten slik den er nå, du ser hva som er forskjellig, og sangene og rekkefølgen settes tilbake.

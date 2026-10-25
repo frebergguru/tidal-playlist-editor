@@ -205,6 +205,13 @@ impl Playlist {
     }
 }
 
+/// Whose radio to read: a track's or an artist's.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RadioSeed {
+    Track(String),
+    Artist(String),
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct User {
     pub id: String,
