@@ -22,7 +22,10 @@ fn main() -> eframe::Result {
             .with_title("TIDAL Playlist Editor")
             .with_app_id("tidal-playlist-editor")
             .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([720.0, 480.0]),
+            .with_min_inner_size([720.0, 480.0])
+            .with_icon(std::sync::Arc::new(
+                eframe::icon_data::from_png_bytes(include_bytes!("../packaging/icon.png")).expect("built-in icon"),
+            )),
         // `style::install_fonts` adds the system font lookup itself, ahead of
         // the black-and-white emoji fallback.
         system_font_fallback: false,

@@ -34,6 +34,7 @@ rm -rf "$OUT"
 mkdir -p "$OUT/$NAME-linux-x86_64" "$OUT/$NAME-windows-x86_64"
 install -m 755 target/release/tidal-editor "$OUT/$NAME-linux-x86_64/$NAME"
 install -m 644 packaging/$NAME.desktop "$OUT/$NAME-linux-x86_64/"
+install -m 644 packaging/icon.png "$OUT/$NAME-linux-x86_64/$NAME.png"
 install -m 644 target/x86_64-pc-windows-gnu/release/tidal-editor.exe "$OUT/$NAME-windows-x86_64/$NAME.exe"
 for d in "$OUT"/$NAME-*; do
     install -m 644 README.md LICENSE NOTICE "$d/"

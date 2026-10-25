@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+<!-- SPDX-License-Identifier: MIT. TIDAL Playlist Editor app icon (our own design). Regenerate the PNG and ICO with tools/gen-icons.sh. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4b2fb0"/>
+      <stop offset="1" stop-color="#0f9fa8"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.18"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bg)"/>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#shine)"/>
+  <!-- playlist rows -->
+  <rect x="44" y="70" width="112" height="22" rx="11" fill="#ffffff"/>
+  <rect x="44" y="117" width="112" height="22" rx="11" fill="#ffffff" fill-opacity="0.85"/>
+  <rect x="44" y="164" width="72" height="22" rx="11" fill="#ffffff" fill-opacity="0.7"/>
+  <!-- music note -->
+  <rect x="190" y="62" width="14" height="118" rx="7" fill="#ffffff"/>
+  <path d="M197 62 C 222 70 228 92 214 112 C 222 92 212 84 197 84 Z" fill="#ffffff"/>
+  <ellipse cx="178" cy="180" rx="27" ry="21" transform="rotate(-22 178 180)" fill="#ffffff"/>
+</svg>

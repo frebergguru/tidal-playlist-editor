@@ -44,7 +44,8 @@ cargo test emoji_screenshot -- --ignored
 | `src/ui/tests.rs` | Headless UI tests through the AccessKit tree |
 | `src/i18n.rs` | Every UI string, English and Norwegian |
 | `src/store.rs` | Config, token files, track cache |
-| `tools/` | `fetch-assets.sh` (fonts, SHA-256 pinned), `gen-notice.py` (NOTICE) |
+| `tools/` | `fetch-assets.sh` (fonts, SHA-256 pinned), `gen-notice.py` (NOTICE), `gen-icons.sh` (icon PNG/ICO) |
+| `packaging/` | `.desktop` file; the app icon: `icon.svg` (our own design) and the `icon.png`/`icon.ico` rendered from it (committed; window icon, Linux package, Windows `.exe` resource via `windres` in `build.rs`) |
 | `release.sh`, `check-stripped.sh` | Release build and the strip check |
 
 ## How the code works
