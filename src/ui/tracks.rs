@@ -351,6 +351,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     // dropped before anything has to be clipped. Their text stays in the row's
     // screen-reader name and tooltip.
     let focus_row = view.focus_row;
+    let mut focus_given = false;
     let mut row_focus = None;
     let avail = ui.available_width();
     // Width unit: the body font size (line height would overestimate widths).
@@ -460,6 +461,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         r.widget_info(|| WidgetInfo::selected(Role::CheckBox, true, is_sel, &a11y));
                         if focus_row == Some(idx) {
                             r.request_focus();
+                            focus_given = true;
                         }
                         if r.has_focus() {
                             row_focus = Some(r.id);
@@ -576,8 +578,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             });
     });
     let view = app.views.get_mut(&pid).expect("view");
-    if focus_row.is_some() {
-        view.focus_row = None;
+    // The table only draws rows in view, and a jump (Home/End) scrolls there
+    // next frame: keep the request (and the scroll) until the row has the focus.
+    if let Some(f) = focus_row {
+        if focus_given || !vis.contains(&f) {
+            view.focus_row = None;
+        } else {
+            view.scroll_to = Some(f);
+            ui.ctx().request_repaint();
+        }
     }
     if row_focus.is_some() || focused_now != view.row_focus {
         view.row_focus = row_focus;

@@ -87,6 +87,8 @@ pub struct SearchState {
     pub view: SearchView,
     pub selected: HashSet<String>,
     pub busy: bool,
+    /// Numbers the panel's requests; replies to older ones are dropped.
+    pub seq: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -154,8 +156,8 @@ pub struct App {
     pub show_log: bool,
     pub dialog: Option<Dialog>,
     pub dialog_opened: bool,
-    /// Results that arrived while the user was busy in another dialog.
-    pending_dialog: Option<Dialog>,
+    /// Results that arrived while the user was busy in another dialog, oldest first.
+    pending_dialog: std::collections::VecDeque<Dialog>,
     pub focus: Option<FocusTarget>,
     pub preview_status: Option<String>,
     /// `PlayerState::plays` when the loading preview was asked for.
@@ -214,13 +216,14 @@ impl App {
                 view: SearchView::Results,
                 selected: HashSet::new(),
                 busy: false,
+                seq: 0,
             },
             jobs: Vec::new(),
             log: Vec::new(),
             show_log: false,
             dialog: None,
             dialog_opened: false,
-            pending_dialog: None,
+            pending_dialog: Default::default(),
             focus: None,
             preview_status: None,
             preview_plays: 0,
@@ -331,23 +334,19 @@ impl App {
         self.dialog_opened = true;
     }
 
-    /// Opens a job's result dialog, unless the user is working in an unrelated
-    /// dialog (typing in Settings, say): then it waits until that one closes.
+    /// Opens a job's result dialog, unless the user is working in another
+    /// dialog (typing in Settings, or ticking songs in a different review): then
+    /// it waits until that one closes. A newer result of the same kind replaces
+    /// the old one.
     fn open_result(&mut self, d: Dialog) {
-        let replaceable = matches!(
-            self.dialog,
-            None | Some(
-                Dialog::Unavailable(_)
-                    | Dialog::Recommend(_)
-                    | Dialog::Videos(_)
-                    | Dialog::Better(_)
-                    | Dialog::ImportReview { .. }
-            ) | Some(Dialog::FromSpotify { .. } | Dialog::ToSpotify { .. })
-        );
+        let replaceable = match &self.dialog {
+            None | Some(Dialog::FromSpotify { .. } | Dialog::ToSpotify { .. }) => true,
+            Some(open) => std::mem::discriminant(open) == std::mem::discriminant(&d),
+        };
         if replaceable {
             self.open_dialog(d);
         } else {
-            self.pending_dialog = Some(d);
+            self.pending_dialog.push_back(d);
             self.note(self.tr.results_waiting.to_owned());
         }
     }
@@ -635,14 +634,25 @@ impl App {
                     }
                 }
             }
-            Event::Search(r) => {
+            // Replies to an older search, album or artist than the latest are out of date.
+            Event::Search(_, seq)
+            | Event::SearchMore { seq, .. }
+            | Event::Album { seq, .. }
+            | Event::Artist { seq, .. }
+            | Event::SearchFailed { seq, .. }
+                if seq != self.search.seq => {}
+            Event::SearchFailed { error, .. } => {
+                self.search.busy = false;
+                self.error(error);
+            }
+            Event::Search(r, _) => {
                 self.search.busy = false;
                 self.cache.remember(r.tracks.iter());
                 self.search.results = Some(r);
                 self.search.view = SearchView::Results;
                 self.search.selected.clear();
             }
-            Event::SearchMore { tracks, next } => {
+            Event::SearchMore { tracks, next, .. } => {
                 self.search.busy = false;
                 self.cache.remember(tracks.iter());
                 if let Some(r) = &mut self.search.results {
@@ -651,13 +661,13 @@ impl App {
                     r.tracks_next = next;
                 }
             }
-            Event::Album { album, tracks } => {
+            Event::Album { album, tracks, .. } => {
                 self.search.busy = false;
                 self.cache.remember(tracks.iter());
                 self.search.selected.clear();
                 self.search.view = SearchView::Album { album, tracks };
             }
-            Event::Artist { artist, albums, tracks } => {
+            Event::Artist { artist, albums, tracks, .. } => {
                 self.search.busy = false;
                 self.cache.remember(tracks.iter());
                 self.search.selected.clear();
@@ -883,12 +893,13 @@ impl App {
                 self.open_dialog(Dialog::duplicate(&p, self.tr));
             }
             if !typing {
-                if pressed(cmd(Key::Z)) {
-                    self.undo_redo(&pid, false);
-                }
+                // Redo first: Ctrl+Z also matches Ctrl+Shift+Z (extra Shift is ignored).
                 if pressed(cmd(Key::Y)) || pressed(KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z))
                 {
                     self.undo_redo(&pid, true);
+                }
+                if pressed(cmd(Key::Z)) {
+                    self.undo_redo(&pid, false);
                 }
             }
         }
@@ -1231,7 +1242,7 @@ impl eframe::App for App {
         }
         dialogs::show(self, &ctx);
         if self.dialog.is_none()
-            && let Some(d) = self.pending_dialog.take()
+            && let Some(d) = self.pending_dialog.pop_front()
         {
             self.open_dialog(d);
         }

@@ -400,7 +400,10 @@ mod tests {
 
     #[test]
     fn relative_url_with_a_url_in_its_query_is_resolved() {
-        assert_eq!(join("https://m.example/x/m.mpd", "s1.mp4?r=https://o.example/"), "https://m.example/x/s1.mp4?r=https://o.example/");
+        assert_eq!(
+            join("https://m.example/x/m.mpd", "s1.mp4?r=https://o.example/"),
+            "https://m.example/x/s1.mp4?r=https://o.example/"
+        );
         assert_eq!(join("https://m.example/x/m.mpd", "https://cdn.example/s1.mp4"), "https://cdn.example/s1.mp4");
     }
 

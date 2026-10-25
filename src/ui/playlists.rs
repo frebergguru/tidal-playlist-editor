@@ -64,7 +64,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             if !p.owned {
                 detail.push_str(&format!(" · {}", tr.collaborator));
             }
-            let text = format!("{}\n{}", p.name, detail);
+            // The ✓ shows the open playlist without relying on the fill colour.
+            let text = format!("{}{}\n{}", if selected { "✓ " } else { "" }, p.name, detail);
             let resp =
                 ui.add(egui::Button::selectable(selected, text).wrap().min_size(egui::vec2(ui.available_width(), 0.0)));
             let a11y = format!("{}, {}", p.name, detail);

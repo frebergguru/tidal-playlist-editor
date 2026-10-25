@@ -148,10 +148,12 @@ pub enum Cmd {
         dedupe: bool,
         job: Job,
     },
-    Search(String),
-    SearchMore(String),
-    AlbumTracks(Album),
-    ArtistDetails(Artist),
+    /// The search panel's requests carry the panel's sequence number, sent
+    /// back with the reply (or [`Event::SearchFailed`]).
+    Search(String, u64),
+    SearchMore(String, u64),
+    AlbumTracks(Album, u64),
+    ArtistDetails(Artist, u64),
     ScanUnavailable {
         playlists: Vec<Playlist>,
         strict: bool,
@@ -333,19 +335,26 @@ pub enum Event {
     PlaylistCreated(Playlist),
     PlaylistUpdated(Playlist),
     PlaylistDeleted(String),
-    Search(SearchResults),
+    Search(SearchResults, u64),
     SearchMore {
         tracks: Vec<Track>,
         next: Option<String>,
+        seq: u64,
     },
     Album {
         album: Album,
         tracks: Vec<Track>,
+        seq: u64,
     },
     Artist {
         artist: Artist,
         albums: Vec<Album>,
         tracks: Vec<Track>,
+        seq: u64,
+    },
+    SearchFailed {
+        seq: u64,
+        error: String,
     },
     Progress {
         job: JobId,
@@ -440,7 +449,12 @@ impl Ctx {
     }
 
     /// Reads a playlist's items and shows them in the UI.
-    async fn items(&self, c: &Client, pid: &str, cancel: &(dyn Fn() -> bool + Sync)) -> Result<Vec<PlaylistItem>, ApiError> {
+    async fn items(
+        &self,
+        c: &Client,
+        pid: &str,
+        cancel: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Vec<PlaylistItem>, ApiError> {
         let seq = self.read_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let items = c.playlist_items(pid, cancel).await?;
         self.emit(Event::Items { pid: pid.to_owned(), items: items.clone(), seq });
@@ -510,7 +524,15 @@ impl WorkerHandle {
                     .build()
                     .expect("tokio runtime");
                 rt.block_on(async move {
+                    // Moves (Alt+Up/Down, drag) run one at a time in the order sent:
+                    // each one's position is worked out from the list after the last.
+                    let (move_tx, move_rx) = tokio::sync::mpsc::unbounded_channel();
+                    tokio::spawn(run_moves(ctx.clone(), move_rx));
                     while let Some(cmd) = rx.recv().await {
+                        if let Cmd::MoveItems { pid, items, before } = cmd {
+                            let _ = move_tx.send((pid, items, before));
+                            continue;
+                        }
                         let ctx = ctx.clone();
                         tokio::spawn(async move { handle(ctx, cmd).await });
                     }
@@ -578,28 +600,28 @@ async fn handle(ctx: Ctx, cmd: Cmd) {
         Cmd::LoadItems(pid) => {
             reload(&ctx, &pid).await;
         }
-        Cmd::Search(query) => match ctx.client().await {
-            Ok(c) => match c.search(&query).await {
-                Ok(r) => ctx.emit(Event::Search(r)),
-                Err(e) => ctx.emit(Event::Error(err_text(&e))),
-            },
-            Err(e) => ctx.emit(Event::Error(err_text(&e))),
-        },
-        Cmd::SearchMore(next) => match ctx.client().await {
-            Ok(c) => match c.search_more_tracks(&next).await {
-                Ok((tracks, next)) => ctx.emit(Event::SearchMore { tracks, next }),
-                Err(e) => ctx.emit(Event::Error(err_text(&e))),
-            },
-            Err(e) => ctx.emit(Event::Error(err_text(&e))),
-        },
-        Cmd::AlbumTracks(album) => {
-            let r = async { ctx.client().await?.album_tracks(&album.id).await }.await;
+        Cmd::Search(query, seq) => {
+            let r = async { ctx.client().await?.search(&query).await }.await;
             match r {
-                Ok(tracks) => ctx.emit(Event::Album { album, tracks }),
-                Err(e) => ctx.emit(Event::Error(err_text(&e))),
+                Ok(r) => ctx.emit(Event::Search(r, seq)),
+                Err(e) => ctx.emit(Event::SearchFailed { seq, error: err_text(&e) }),
             }
         }
-        Cmd::ArtistDetails(artist) => {
+        Cmd::SearchMore(next, seq) => {
+            let r = async { ctx.client().await?.search_more_tracks(&next).await }.await;
+            match r {
+                Ok((tracks, next)) => ctx.emit(Event::SearchMore { tracks, next, seq }),
+                Err(e) => ctx.emit(Event::SearchFailed { seq, error: err_text(&e) }),
+            }
+        }
+        Cmd::AlbumTracks(album, seq) => {
+            let r = async { ctx.client().await?.album_tracks(&album.id).await }.await;
+            match r {
+                Ok(tracks) => ctx.emit(Event::Album { album, tracks, seq }),
+                Err(e) => ctx.emit(Event::SearchFailed { seq, error: err_text(&e) }),
+            }
+        }
+        Cmd::ArtistDetails(artist, seq) => {
             let r = async {
                 let c = ctx.client().await?;
                 let tracks = c.artist_tracks(&artist.id).await.unwrap_or_default();
@@ -608,8 +630,8 @@ async fn handle(ctx: Ctx, cmd: Cmd) {
             }
             .await;
             match r {
-                Ok((albums, tracks)) => ctx.emit(Event::Artist { artist, albums, tracks }),
-                Err(e) => ctx.emit(Event::Error(err_text(&e))),
+                Ok((albums, tracks)) => ctx.emit(Event::Artist { artist, albums, tracks, seq }),
+                Err(e) => ctx.emit(Event::SearchFailed { seq, error: err_text(&e) }),
             }
         }
         Cmd::UpdatePlaylist { pid, name, description, access } => {
@@ -638,15 +660,6 @@ async fn handle(ctx: Ctx, cmd: Cmd) {
                 }
                 Err(e) => ctx.emit(Event::Error(err_text(&e))),
             }
-        }
-        Cmd::MoveItems { pid, items, before } => {
-            let _g = ctx.write_lock.lock().await;
-            let r = async { ctx.client().await?.move_items(&pid, &items, before.as_deref(), &|_| {}, &|| false).await }
-                .await;
-            if let Err(e) = r {
-                ctx.emit(Event::Error(err_text(&e)));
-            }
-            reload(&ctx, &pid).await;
         }
         Cmd::Favourite { ids, add } => {
             let r = async { ctx.client().await?.set_favourite_tracks(&ids, add).await }.await;
@@ -1615,6 +1628,30 @@ async fn genre_songs(
     let mut picked = generate::fresh(found, have);
     picked.truncate(want);
     Ok(picked)
+}
+
+type Move = (String, Vec<(ItemRef, String)>, Option<String>);
+
+/// Applies queued moves in order. A playlist is reloaded only once no more moves
+/// are waiting, so a reload never undoes the UI's later, still unsent moves.
+async fn run_moves(ctx: Ctx, mut rx: tokio::sync::mpsc::UnboundedReceiver<Move>) {
+    let mut moved = std::collections::BTreeSet::new();
+    while let Some((pid, items, before)) = rx.recv().await {
+        {
+            let _g = ctx.write_lock.lock().await;
+            let r = async { ctx.client().await?.move_items(&pid, &items, before.as_deref(), &|_| {}, &|| false).await }
+                .await;
+            if let Err(e) = r {
+                ctx.emit(Event::Error(err_text(&e)));
+            }
+        }
+        moved.insert(pid);
+        if rx.is_empty() {
+            for pid in std::mem::take(&mut moved) {
+                reload(&ctx, &pid).await;
+            }
+        }
+    }
 }
 
 async fn reload(ctx: &Ctx, pid: &str) {

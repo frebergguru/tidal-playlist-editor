@@ -116,7 +116,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         (SearchTab::Artists, tr.artists, r.artists.len()),
                     ] {
                         let sel = app.search.tab == tab;
-                        let resp = ui.add(egui::Button::selectable(sel, format!("{name} ({n})")));
+                        // The ✓ shows the open tab without relying on the fill colour.
+                        let mark = if sel { "✓ " } else { "" };
+                        let resp = ui.add(egui::Button::selectable(sel, format!("{mark}{name} ({n})")));
                         resp.widget_info(|| WidgetInfo::selected(Role::Tab, true, sel, format!("{name} ({n})")));
                         if resp.clicked() {
                             app.search.tab = tab;
@@ -147,11 +149,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                 for a in &r.artists {
                                     ui.horizontal(|ui| {
                                         ui.label(&a.name);
-                                        if ui
-                                            .button(tr.open)
-                                            .on_hover_text(i18n::fmt(tr.open_artist, &[&a.name]))
-                                            .clicked()
-                                        {
+                                        let name = i18n::fmt(tr.open_artist, &[&a.name]);
+                                        let b = ui.button(tr.open);
+                                        b.widget_info(|| WidgetInfo::labeled(Role::Button, true, &name));
+                                        if b.on_hover_text(&name).clicked() {
                                             acts.push(Act::OpenArtist(a.clone()));
                                         }
                                     });
@@ -170,13 +171,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 let q = app.search.query.trim().to_owned();
                 if !q.is_empty() {
                     app.search.busy = true;
+                    app.search.seq += 1;
                     app.search.tab = SearchTab::Tracks;
-                    app.worker.send(Cmd::Search(q));
+                    app.worker.send(Cmd::Search(q, app.search.seq));
                 }
             }
             Act::More(next) => {
+                // More of the shown results: same number, so a newer search wins.
                 app.search.busy = true;
-                app.worker.send(Cmd::SearchMore(next));
+                app.worker.send(Cmd::SearchMore(next, app.search.seq));
             }
             Act::Play(t) => app.play(&t),
             Act::Open(t) => app.open_in_tidal(t.app_url(), t.web_url()),
@@ -189,14 +192,19 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             Act::AddTo(refs) => app.open_dialog(Dialog::add_to(refs, None, None)),
             Act::OpenAlbum(al) => {
                 app.search.busy = true;
-                app.worker.send(Cmd::AlbumTracks(al));
+                app.search.seq += 1;
+                app.worker.send(Cmd::AlbumTracks(al, app.search.seq));
             }
             Act::OpenArtist(ar) => {
                 app.search.busy = true;
-                app.worker.send(Cmd::ArtistDetails(ar));
+                app.search.seq += 1;
+                app.worker.send(Cmd::ArtistDetails(ar, app.search.seq));
             }
             Act::Radio(a) => app.save_radio(crate::api::RadioSeed::Artist(a.id), &a.name),
             Act::Back => {
+                // An album or artist still loading must not open after going back.
+                app.search.seq += 1;
+                app.search.busy = false;
                 app.search.view = SearchView::Results;
                 app.search.selected.clear();
             }

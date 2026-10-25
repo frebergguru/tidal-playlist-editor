@@ -126,6 +126,59 @@ fn keyboard_moves_and_removes_rows() {
 }
 
 #[test]
+fn end_and_home_keep_focus_on_a_long_playlist() {
+    let mut h = harness();
+    logged_in(&mut h);
+    let long: Vec<PlaylistItem> = (1..=300).map(|n| item(n, &format!("Song {n}"), true)).collect();
+    h.state_mut().items.insert("p1".into(), long);
+    h.run();
+    h.get_by_label_contains("Row 1, Song 1,").focus();
+    h.run();
+    h.key_press(Key::End);
+    h.run();
+    assert_eq!(h.state().views["p1"].cursor, Some(299));
+    assert!(h.get_by_label_contains("Row 300, Song 300,").accesskit_node().is_focused(), "focus follows End");
+    h.key_press(Key::Home);
+    h.run();
+    assert!(h.get_by_label_contains("Row 1, Song 1,").accesskit_node().is_focused(), "focus follows Home");
+}
+
+#[test]
+fn old_search_replies_are_dropped_and_failures_end_the_search() {
+    use crate::worker::Event;
+    let mut h = harness();
+    logged_in(&mut h);
+    let ctx = h.ctx.clone();
+    let found = |title: &str| crate::api::SearchResults {
+        tracks: vec![Track { id: "9".into(), title: title.into(), ..Default::default() }],
+        ..Default::default()
+    };
+    let app = h.state_mut();
+    app.search.busy = true;
+    app.search.seq = 2;
+    app.handle_event(&ctx, Event::Search(found("Old"), 1));
+    assert!(app.search.results.is_none() && app.search.busy, "reply to an older search is dropped");
+    app.handle_event(&ctx, Event::SearchFailed { seq: 2, error: "offline".into() });
+    assert!(!app.search.busy, "a failed search stops saying «Searching»");
+    assert!(app.log.last().is_some_and(|l| l.error && l.text == "offline"));
+}
+
+#[test]
+fn a_new_result_waits_while_another_review_is_open() {
+    let mut h = harness();
+    logged_in(&mut h);
+    let app = h.state_mut();
+    app.open_dialog(super::Dialog::unavailable_results(Vec::new()));
+    app.open_result(super::Dialog::better_results(crate::worker::BetterMode::Clean, Vec::new()));
+    assert!(matches!(app.dialog, Some(super::Dialog::Unavailable(_))), "the open review is kept");
+    app.open_result(super::Dialog::unavailable_results(Vec::new()));
+    assert!(matches!(app.dialog, Some(super::Dialog::Unavailable(_))));
+    app.dialog = None;
+    h.run();
+    assert!(matches!(h.state().dialog, Some(super::Dialog::Better(_))), "shown once the review closes");
+}
+
+#[test]
 fn dialogs_open_from_keyboard_and_close_with_escape() {
     let mut h = harness();
     logged_in(&mut h);

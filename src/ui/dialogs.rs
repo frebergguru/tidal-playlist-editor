@@ -1376,6 +1376,8 @@ fn save_mixes(
                 ui.label(tr.no_mixes);
             }
             Some(list) => {
+                // The list arrives after the dialog opened: focus it then.
+                let first = first || ui.memory(|m| m.focused().is_none());
                 egui::ScrollArea::vertical().max_height(ui.available_height() - 80.0).show(ui, |ui| {
                     for (n, m) in list.iter().enumerate() {
                         let mut on = picked.contains(&m.id);
@@ -2137,6 +2139,8 @@ fn pick_list(
     first: bool,
     ok_label: &str,
 ) -> (bool, bool) {
+    // The list may arrive after the dialog opened (Spotify): focus it then.
+    let first = first || ui.memory(|m| m.focused().is_none());
     ui.horizontal(|ui| {
         if ui.button(tr.select_all).clicked() {
             *selected = items.iter().map(|i| i.0.clone()).collect();

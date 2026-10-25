@@ -407,7 +407,8 @@ impl Client {
             let v = self.send(Method::POST, &path, &Query::new(), Some(&body)).await?;
             for s in v.pointer("/meta/skipped").and_then(Value::as_array).into_iter().flatten() {
                 if jsonapi::str_of(s, "reason").as_deref() == Some("NOT_FOUND") {
-                    let kind = jsonapi::str_of(s, "type").and_then(|t| ItemKind::from_api(&t)).unwrap_or(ItemKind::Track);
+                    let kind =
+                        jsonapi::str_of(s, "type").and_then(|t| ItemKind::from_api(&t)).unwrap_or(ItemKind::Track);
                     skipped.not_found.push(ItemRef { kind, id: jsonapi::str_of(s, "id").unwrap_or_default() });
                 } else {
                     skipped.present += 1;
