@@ -12,7 +12,7 @@ for third-party apps (genres did), so check each one against the live API before
       cover names through AccessKit, but the live window has not been checked.
 - [ ] **Live test of writing features:** generate a playlist, swap videos for songs,
       add recommendations, upgrade sound quality, swap clean versions, save a radio,
-      remove copies across playlists, trim, on a real account.
+      remove copies across playlists, trim, save my mixes as playlists, on a real account.
 
 ## Done
 
