@@ -824,3 +824,25 @@ fn mixes_that_fail_to_load_say_so() {
     h.run();
     assert!(h.state().dialog.is_none());
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn menu_entry_follows_the_setting() {
+    let mut h = harness();
+    logged_in(&mut h);
+    let share = h.state().paths.share_dir.clone();
+    let entry = share.join("applications/tidal-playlist-editor.desktop");
+    h.state_mut().sync_menu_entry();
+    assert!(entry.exists(), "written at start");
+    let cfg = h.state().cfg.clone();
+    h.state_mut().open_dialog(super::Dialog::settings(&cfg));
+    h.run();
+    h.get_by_role_and_label(Role::CheckBox, "Show in the application menu (also gives the window its icon)").click();
+    h.run();
+    h.get_by_role_and_label(Role::Button, "Save").click();
+    h.run();
+    assert!(!entry.exists(), "removed when turned off");
+    h.state_mut().cfg.menu_entry = true;
+    h.state_mut().sync_menu_entry();
+    assert!(entry.exists());
+}

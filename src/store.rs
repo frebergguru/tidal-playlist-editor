@@ -84,6 +84,8 @@ pub struct Config {
     pub spotify_client_id: String,
     /// Spotify requires a loopback IP literal for local apps (not "localhost").
     pub spotify_redirect_uri: String,
+    /// Linux: keep a menu entry and icon in `~/.local/share` (the window icon on Wayland).
+    pub menu_entry: bool,
 }
 
 impl Default for Config {
@@ -105,6 +107,7 @@ impl Default for Config {
             geo_check: false,
             spotify_client_id: String::new(),
             spotify_redirect_uri: "http://127.0.0.1:8766/callback".into(),
+            menu_entry: true,
         }
     }
 }
@@ -115,6 +118,8 @@ pub struct Paths {
     pub spotify_token_file: PathBuf,
     pub cache_file: PathBuf,
     pub backup_dir: PathBuf,
+    /// Where desktops look for menu entries and icons (`~/.local/share`).
+    pub share_dir: PathBuf,
 }
 
 impl Paths {
@@ -122,23 +127,25 @@ impl Paths {
     pub fn new() -> Self {
         if let Some(home) = std::env::var_os("TIDAL_EDITOR_HOME") {
             let home = PathBuf::from(home);
-            return Self::from_dirs(home.join("config"), home.join("data"));
+            return Self::from_dirs(home.join("config"), home.join("data"), home.join("share"));
         }
         let dirs = directories::ProjectDirs::from("guru", "freberg", "tidal-playlist-editor");
         let (cfg, data) = match &dirs {
             Some(d) => (d.config_dir().to_path_buf(), d.data_dir().to_path_buf()),
             None => (PathBuf::from("."), PathBuf::from(".")),
         };
-        Self::from_dirs(cfg, data)
+        let share = directories::BaseDirs::new().map(|b| b.data_dir().to_path_buf()).unwrap_or_else(|| data.clone());
+        Self::from_dirs(cfg, data, share)
     }
 
-    fn from_dirs(cfg: PathBuf, data: PathBuf) -> Self {
+    fn from_dirs(cfg: PathBuf, data: PathBuf, share: PathBuf) -> Self {
         Self {
             config_file: cfg.join("config.toml"),
             token_file: cfg.join("tokens.json"),
             spotify_token_file: cfg.join("spotify-tokens.json"),
             cache_file: data.join("track-cache.json"),
             backup_dir: data.join("backups"),
+            share_dir: share,
         }
     }
 }
@@ -150,7 +157,7 @@ mod tests {
     #[test]
     fn broken_config_is_kept_aside_and_saves_are_private() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::from_dirs(dir.path().join("c"), dir.path().join("d"));
+        let paths = Paths::from_dirs(dir.path().join("c"), dir.path().join("d"), dir.path().join("s"));
         std::fs::create_dir_all(dir.path().join("c")).unwrap();
         std::fs::write(&paths.config_file, "client_id = \"keep me\"\nvolume = \"loud\"\n").unwrap();
         let cfg = Config::load(&paths);

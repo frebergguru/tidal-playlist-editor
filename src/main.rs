@@ -1,6 +1,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod api;
+#[cfg(target_os = "linux")]
+mod desktop;
 mod i18n;
 mod ops;
 mod player;

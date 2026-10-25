@@ -108,9 +108,9 @@ cargo test screenshots -- --ignored        # renders target/screens/*.png withou
 
 `release.sh` runs the tests and clippy, and builds both targets. It then checks with `check-stripped.sh` that every shipped binary is stripped, and stops the release if one is not.
 Windows is cross-compiled with MinGW (`x86_64-pc-windows-gnu`); `build.rs` puts the app icon into the `.exe` with MinGW's `windres`.
-The Linux package has a `.desktop` file and the icon; to show them in your menu, copy
-`tidal-playlist-editor.desktop` to `~/.local/share/applications/` and `tidal-playlist-editor.png`
-to `~/.local/share/icons/hicolor/256x256/apps/`, with the program itself on your `PATH`.
+On Linux the app adds itself to the application menu when it starts (a `.desktop` file and the icon in
+`~/.local/share`, pointing at wherever the program is). On Wayland this is also what gives the window
+its icon. Turn it off in Settings, which removes the files again.
 
 ## Reporting problems
 
@@ -181,9 +181,9 @@ høyere tilgangsnivå, spiller den samme koden hele sporet. Spor med DRM kan ikk
 5. Start programmet, åpne **API-innstillinger …**, lim inn **Client ID** og lagre. Du trenger ikke klienthemmelighet.
 6. Trykk **Logg inn med TIDAL** og logg inn i nettleseren. Programmet fortsetter av seg selv; det er ingen tidsgrense.
 
-På Linux har pakken en `.desktop`-fil og ikonet. Vil du ha programmet i menyen, kopierer du
-`tidal-playlist-editor.desktop` til `~/.local/share/applications/` og `tidal-playlist-editor.png`
-til `~/.local/share/icons/hicolor/256x256/apps/`, og legger selve programmet i `PATH`.
+På Linux legger programmet seg selv inn i programmenyen når det starter (en `.desktop`-fil og ikonet i
+`~/.local/share`, som peker dit programmet ligger). På Wayland er det også dette som gir vinduet ikonet
+sitt. Du kan slå det av i Innstillinger, og da fjernes filene igjen.
 
 ## Spotify (valgfritt)
 

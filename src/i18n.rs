@@ -205,6 +205,8 @@ strings! {
     mix_name => "{0} ({1})", "{0} ({1})";
     mix_description => "Copy of TIDAL's «{0}», saved {1}.", "Kopi av TIDAL-miksen «{0}», lagret {1}.";
     save_n => "Save {0}", "Lagre {0}";
+    menu_entry => "Show in the application menu (also gives the window its icon)", "Vis i programmenyen (gir også vinduet ikonet sitt)";
+    menu_entry_failed => "Could not update the menu entry", "Kunne ikke oppdatere menyoppføringen";
     saving_mix => "Saving «{0}» as a playlist", "Lagrer «{0}» som spilleliste";
     err_mixes_scope => "TIDAL did not give access to your mixes. Log out and log in again, and make sure the app has the scope recommendations.read in the TIDAL developer portal.", "TIDAL ga ikke tilgang til miksene dine. Logg ut og inn igjen, og sjekk at appen har tilgangen recommendations.read i utviklerportalen til TIDAL.";
     err_no_radio => "TIDAL has no radio for this.", "TIDAL har ingen radio for dette.";

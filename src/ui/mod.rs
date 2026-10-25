@@ -224,6 +224,7 @@ impl App {
             cfg,
             paths,
         };
+        app.sync_menu_entry();
         if app.cfg.has_spotify() {
             app.spotify = SpState::Checking;
             app.worker.send(Cmd::SpotifyRestore(app.spotify_config()));
@@ -233,6 +234,14 @@ impl App {
             app.worker.send(Cmd::RestoreSession(app.auth_config()));
         }
         app
+    }
+
+    /// Linux: adds, updates or removes the app's menu entry and icon to match
+    /// the setting. Other systems take the icon from the program itself.
+    pub fn sync_menu_entry(&mut self) {
+        if let Err(e) = menu_entry(&self.paths.share_dir, self.cfg.menu_entry) {
+            self.error(format!("{}: {e}", self.tr.menu_entry_failed));
+        }
     }
 
     pub fn auth_config(&self) -> AuthConfig {
@@ -1152,6 +1161,20 @@ impl App {
             });
         });
     }
+}
+
+#[cfg(target_os = "linux")]
+fn menu_entry(share: &std::path::Path, on: bool) -> std::io::Result<()> {
+    match crate::desktop::program() {
+        Some(exe) if on => crate::desktop::install(share, &exe).map(|_| ()),
+        Some(_) => crate::desktop::remove(share),
+        None => Ok(()),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn menu_entry(_share: &std::path::Path, _on: bool) -> std::io::Result<()> {
+    Ok(())
 }
 
 impl eframe::App for App {

@@ -958,6 +958,9 @@ fn settings(app: &mut App, ctx: &egui::Context, f: &mut SettingsForm, first: boo
                 ui.radio_value(&mut c.open_in, OpenIn::Web, tr.web_browser);
             });
             ui.checkbox(&mut c.strict_availability, tr.strict_check);
+            if cfg!(target_os = "linux") {
+                ui.checkbox(&mut c.menu_entry, tr.menu_entry);
+            }
             ui.separator();
             ui.strong(tr.tidal_api);
             ui.label(tr.api_explain);
@@ -1005,7 +1008,11 @@ fn settings(app: &mut App, ctx: &egui::Context, f: &mut SettingsForm, first: boo
         c.export_dir = app.cfg.export_dir.clone();
         c.volume = app.cfg.volume;
         c.show_search = app.cfg.show_search;
+        let menu_changed = app.cfg.menu_entry != c.menu_entry;
         app.cfg = c.clone();
+        if menu_changed {
+            app.sync_menu_entry();
+        }
         app.set_text_scale(ctx, c.text_scale);
         app.restyle(ctx);
         if api_changed && app.auth == super::AuthState::LoggedIn {
