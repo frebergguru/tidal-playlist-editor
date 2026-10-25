@@ -30,11 +30,20 @@ pub fn q(pairs: &[(&str, &str)]) -> Query {
     pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
 }
 
+/// What [`Client::add_items`] left out, from the response's `meta.skipped`.
+#[derive(Debug, Default)]
+pub struct Skipped {
+    /// Already in the playlist (only with `skip_duplicates`).
+    pub present: usize,
+    /// Not available on TIDAL, so not added at all.
+    pub not_found: Vec<ItemRef>,
+}
+
 pub struct Client {
     http: reqwest::Client,
     base: String,
     auth: AuthConfig,
-    tokens: Mutex<TokenSet>,
+    tokens: std::sync::Arc<Mutex<TokenSet>>,
     token_path: Option<PathBuf>,
     country: std::sync::RwLock<String>,
 }
@@ -63,7 +72,7 @@ impl Client {
             http: Self::http(),
             base: base.trim_end_matches('/').to_owned(),
             auth,
-            tokens: Mutex::new(tokens),
+            tokens: std::sync::Arc::new(Mutex::new(tokens)),
             token_path,
             country: std::sync::RwLock::new("US".into()),
         }
@@ -98,21 +107,35 @@ impl Client {
     /// token that just got a 401: it is refreshed unless another request has
     /// already replaced it.
     async fn access_token(&self, rejected: Option<&str>) -> Result<String> {
-        let mut t = self.tokens.lock().await;
-        let force_refresh = rejected.is_some_and(|r| r == t.access_token);
-        if force_refresh || t.expires_soon() {
-            let Some(rt) = t.refresh_token.clone() else {
-                return if force_refresh { Err(ApiError::NotLoggedIn) } else { Ok(t.access_token.clone()) };
-            };
-            let fresh = auth::refresh(&self.http, &self.auth, &rt).await?;
-            if let Some(p) = &self.token_path
-                && let Err(e) = auth::save_tokens(p, &fresh)
-            {
-                tracing::warn!("could not save tokens: {e}");
+        {
+            let t = self.tokens.lock().await;
+            if !rejected.is_some_and(|r| r == t.access_token) && !t.expires_soon() {
+                return Ok(t.access_token.clone());
             }
-            *t = fresh;
         }
-        Ok(t.access_token.clone())
+        // The refresh runs in its own task: a request cancelled mid-refresh (an
+        // aborted JoinSet) must not drop a refresh token the server just rotated.
+        let (tokens, http, cfg, path) =
+            (self.tokens.clone(), self.http.clone(), self.auth.clone(), self.token_path.clone());
+        let rejected = rejected.map(str::to_owned);
+        let task = tokio::spawn(async move {
+            let mut t = tokens.lock().await;
+            let force_refresh = rejected.is_some_and(|r| r == t.access_token);
+            if force_refresh || t.expires_soon() {
+                let Some(rt) = t.refresh_token.clone() else {
+                    return if force_refresh { Err(ApiError::NotLoggedIn) } else { Ok(t.access_token.clone()) };
+                };
+                let fresh = auth::refresh(&http, &cfg, &rt).await?;
+                if let Some(p) = &path
+                    && let Err(e) = auth::save_tokens(p, &fresh)
+                {
+                    tracing::warn!("could not save tokens: {e}");
+                }
+                *t = fresh;
+            }
+            Ok(t.access_token.clone())
+        });
+        task.await.map_err(|e| ApiError::Other(format!("token refresh: {e}")))?
     }
 
     /// Sends one request with retries on 429/5xx and a single re-auth on 401.
@@ -353,7 +376,7 @@ impl Client {
     }
 
     /// Adds items in order. With `before`, every batch is inserted before that
-    /// occurrence, which keeps the overall order. Returns the number of skipped duplicates.
+    /// occurrence, which keeps the overall order. Returns what was left out.
     pub async fn add_items(
         &self,
         pid: &str,
@@ -362,9 +385,9 @@ impl Client {
         skip_duplicates: bool,
         progress: &(dyn Fn(usize) + Sync),
         cancel: &(dyn Fn() -> bool + Sync),
-    ) -> Result<usize> {
+    ) -> Result<Skipped> {
         let path = format!("/playlists/{pid}/relationships/items");
-        let (mut skipped, mut done) = (0, 0);
+        let (mut skipped, mut done) = (Skipped::default(), 0);
         for chunk in refs.chunks(ADD_BATCH) {
             if cancel() {
                 return Err(ApiError::Cancelled);
@@ -382,7 +405,14 @@ impl Client {
                 body["meta"] = Value::Object(meta);
             }
             let v = self.send(Method::POST, &path, &Query::new(), Some(&body)).await?;
-            skipped += v.pointer("/meta/skipped").and_then(Value::as_array).map_or(0, Vec::len);
+            for s in v.pointer("/meta/skipped").and_then(Value::as_array).into_iter().flatten() {
+                if jsonapi::str_of(s, "reason").as_deref() == Some("NOT_FOUND") {
+                    let kind = jsonapi::str_of(s, "type").and_then(|t| ItemKind::from_api(&t)).unwrap_or(ItemKind::Track);
+                    skipped.not_found.push(ItemRef { kind, id: jsonapi::str_of(s, "id").unwrap_or_default() });
+                } else {
+                    skipped.present += 1;
+                }
+            }
             done += chunk.len();
             progress(done);
         }
@@ -975,7 +1005,9 @@ mod tests {
             .and(header_exists("Idempotency-Key"))
             .and(body_json(json!({"data": [{"type": "tracks", "id": "1"}, {"type": "videos", "id": "2"}],
                 "meta": {"onDuplicates": "SKIP", "positionBefore": "occ-9"}})))
-            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"meta": {"skipped": [{"id": "1"}]}})))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"meta": {"skipped": [
+                {"id": "1", "type": "tracks", "reason": "ALREADY_PRESENT"},
+                {"id": "2", "type": "videos", "reason": "NOT_FOUND"}]}})))
             .expect(1)
             .mount(&server)
             .await;
@@ -997,7 +1029,8 @@ mod tests {
         let c = client(&server, far());
         let refs = vec![ItemRef::track("1"), ItemRef { kind: ItemKind::Video, id: "2".into() }];
         let skipped = c.add_items("p", &refs, Some("occ-9"), true, &|_| {}, &|| false).await.unwrap();
-        assert_eq!(skipped, 1);
+        assert_eq!(skipped.present, 1);
+        assert_eq!(skipped.not_found, [ItemRef { kind: ItemKind::Video, id: "2".into() }]);
         c.remove_items("p", &[(ItemRef::track("1"), "occ-1".into())], &|_| {}, &|| false).await.unwrap();
         c.move_items("p", &[(ItemRef::track("3"), "occ-3".into())], Some("occ-1"), &|_| {}, &|| false).await.unwrap();
     }

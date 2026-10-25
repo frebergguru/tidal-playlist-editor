@@ -97,7 +97,8 @@ fn fill(tpl: &str, rep: &str, bw: u64, number: u64, time: u64) -> String {
 }
 
 fn join(base: &str, rel: &str) -> String {
-    if rel.contains("://") || base.is_empty() {
+    // Absolute when it has its own scheme (a query string may hold "://" too).
+    if base.is_empty() || url::Url::parse(rel).is_ok() {
         return rel.to_owned();
     }
     url::Url::parse(base).and_then(|b| b.join(rel)).map(String::from).unwrap_or_else(|_| rel.to_owned())
@@ -176,6 +177,10 @@ pub fn parse_mpd(xml: &str, manifest_url: &str) -> Result<Vec<Representation>, S
                         parent.duration = Some(v);
                     }
                     in_timeline_of_rep = rep.is_some();
+                }
+                // A Representation's own timeline replaces the inherited one.
+                "SegmentTimeline" if in_timeline_of_rep => {
+                    rep_tpl.get_or_insert_with(|| set_tpl.clone()).timeline.clear();
                 }
                 "S" => {
                     let s = (
@@ -379,6 +384,24 @@ mod tests {
         </Representation></AdaptationSet></Period></MPD>"#;
         let reps = parse_mpd(mpd, "https://m.example/x.mpd").unwrap();
         assert_eq!(reps[0].urls, ["https://m.example/0", "https://m.example/4", "https://m.example/8"]);
+    }
+
+    #[test]
+    fn own_timeline_replaces_the_inherited_one() {
+        let mpd = r#"<MPD><Period><AdaptationSet>
+          <SegmentTemplate timescale="1" media="s$Time$"><SegmentTimeline><S t="0" d="5" r="1"/></SegmentTimeline></SegmentTemplate>
+          <Representation id="a">
+            <SegmentTemplate media="a$Time$"><SegmentTimeline><S t="0" d="3" r="1"/></SegmentTimeline></SegmentTemplate>
+          </Representation>
+        </AdaptationSet></Period></MPD>"#;
+        let reps = parse_mpd(mpd, "https://m.example/x.mpd").unwrap();
+        assert_eq!(reps[0].urls, ["https://m.example/a0", "https://m.example/a3"]);
+    }
+
+    #[test]
+    fn relative_url_with_a_url_in_its_query_is_resolved() {
+        assert_eq!(join("https://m.example/x/m.mpd", "s1.mp4?r=https://o.example/"), "https://m.example/x/s1.mp4?r=https://o.example/");
+        assert_eq!(join("https://m.example/x/m.mpd", "https://cdn.example/s1.mp4"), "https://cdn.example/s1.mp4");
     }
 
     #[test]

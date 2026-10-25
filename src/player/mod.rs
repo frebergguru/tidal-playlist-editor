@@ -26,6 +26,8 @@ pub struct PlayerState {
     pub pos_secs: f32,
     pub total_secs: Option<f32>,
     pub error: Option<String>,
+    /// Counts `Play` commands handled, whether they played or failed.
+    pub plays: u64,
 }
 
 #[derive(Clone)]
@@ -72,6 +74,7 @@ fn run(rx: mpsc::Receiver<PlayerCmd>, state: Arc<Mutex<PlayerState>>, mut volume
                         }
                         Err(e) => {
                             set_error(&state, format!("audio output: {e}"));
+                            state.lock().expect("state").plays += 1;
                             repaint();
                             continue;
                         }
@@ -91,7 +94,9 @@ fn run(rx: mpsc::Receiver<PlayerCmd>, state: Arc<Mutex<PlayerState>>, mut volume
                         p.set_volume(volume);
                         p.append(dec);
                         player = Some(p);
-                        *state.lock().expect("state") = PlayerState {
+                        let mut s = state.lock().expect("state");
+                        *s = PlayerState {
+                            plays: s.plays,
                             title,
                             track_id,
                             full,
@@ -104,6 +109,7 @@ fn run(rx: mpsc::Receiver<PlayerCmd>, state: Arc<Mutex<PlayerState>>, mut volume
                     }
                     Err(e) => set_error(&state, format!("decode: {e}")),
                 }
+                state.lock().expect("state").plays += 1;
                 repaint();
             }
             Ok(PlayerCmd::TogglePause) => {

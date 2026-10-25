@@ -141,6 +141,8 @@ pub struct App {
     pub current: Option<String>,
     pub items: HashMap<String, Vec<PlaylistItem>>,
     pub loading: HashSet<String>,
+    /// Per playlist, the `seq` of the item list shown (see `Event::Items`).
+    items_seq: HashMap<String, u64>,
     pub views: HashMap<String, ViewState>,
     /// Seed rows of a pending recommendation search, per playlist.
     pub recommend_rows: HashMap<String, HashSet<String>>,
@@ -156,6 +158,8 @@ pub struct App {
     pending_dialog: Option<Dialog>,
     pub focus: Option<FocusTarget>,
     pub preview_status: Option<String>,
+    /// `PlayerState::plays` when the loading preview was asked for.
+    preview_plays: u64,
     pub reduced_motion: bool,
     /// The system "reduce animations" setting, kept current by a watcher thread.
     system_motion: Arc<std::sync::atomic::AtomicBool>,
@@ -168,7 +172,10 @@ pub struct App {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let paths = Paths::new();
+        Self::with_paths(cc, Paths::new())
+    }
+
+    pub fn with_paths(cc: &eframe::CreationContext<'_>, paths: Paths) -> Self {
         let cfg = Config::load(&paths);
         let ctx = cc.egui_ctx.clone();
         let repaint_ctx = ctx.clone();
@@ -195,6 +202,7 @@ impl App {
             current: cfg.last_playlist.clone(),
             items: HashMap::new(),
             loading: HashSet::new(),
+            items_seq: HashMap::new(),
             views: HashMap::new(),
             recommend_rows: HashMap::new(),
             undo: HashMap::new(),
@@ -215,6 +223,7 @@ impl App {
             pending_dialog: None,
             focus: None,
             preview_status: None,
+            preview_plays: 0,
             reduced_motion,
             system_motion,
             copy_text: None,
@@ -578,7 +587,13 @@ impl App {
                     }
                 }
             }
-            Event::Items { pid, items } => {
+            Event::Items { pid, items, seq } => {
+                // A read that started before the shown list (say, a long scan that
+                // overlapped an edit) would bring back removed rows.
+                if self.items_seq.get(&pid).is_some_and(|&shown| seq < shown) {
+                    return;
+                }
+                self.items_seq.insert(pid.clone(), seq);
                 self.loading.remove(&pid);
                 self.cache.remember(items.iter().filter_map(|i| i.track.as_ref()));
                 if let Some(v) = self.views.get_mut(&pid) {
@@ -776,7 +791,10 @@ impl App {
                 self.note(text);
             }
             Event::Error(e) => self.error(e),
-            Event::PreviewLoading(title) => self.preview_status = Some(i18n::fmt(tr.loading_preview, &[&title])),
+            Event::PreviewLoading(title) => {
+                self.preview_status = Some(i18n::fmt(tr.loading_preview, &[&title]));
+                self.preview_plays = self.player.snapshot().plays;
+            }
             Event::PreviewFailed(f) => {
                 self.preview_status = None;
                 let text = match f {

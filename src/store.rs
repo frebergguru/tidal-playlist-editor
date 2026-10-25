@@ -126,8 +126,7 @@ impl Paths {
     /// Per-user directories, or `$TIDAL_EDITOR_HOME` when set (portable use and tests).
     pub fn new() -> Self {
         if let Some(home) = std::env::var_os("TIDAL_EDITOR_HOME") {
-            let home = PathBuf::from(home);
-            return Self::from_dirs(home.join("config"), home.join("data"), home.join("share"));
+            return Self::in_home(Path::new(&home));
         }
         let dirs = directories::ProjectDirs::from("guru", "freberg", "tidal-playlist-editor");
         let (cfg, data) = match &dirs {
@@ -136,6 +135,11 @@ impl Paths {
         };
         let share = directories::BaseDirs::new().map(|b| b.data_dir().to_path_buf()).unwrap_or_else(|| data.clone());
         Self::from_dirs(cfg, data, share)
+    }
+
+    /// Everything under one folder (`config/`, `data/`, `share/`).
+    pub fn in_home(home: &Path) -> Self {
+        Self::from_dirs(home.join("config"), home.join("data"), home.join("share"))
     }
 
     fn from_dirs(cfg: PathBuf, data: PathBuf, share: PathBuf) -> Self {

@@ -317,8 +317,11 @@ impl SpotifyClient {
             body["description"] = description.into();
         }
         let v = self.send(Method::POST, "/me/playlists", &[], Some(&body)).await?;
+        // An empty id would mean Liked Songs, so a missing one is an error.
+        let id = v.get("id").and_then(Value::as_str).filter(|id| !id.is_empty());
+        let id = id.ok_or_else(|| ApiError::Other("create playlist: no id in response".into()))?;
         Ok(SpPlaylist {
-            id: v.get("id").and_then(Value::as_str).unwrap_or_default().to_owned(),
+            id: id.to_owned(),
             name: name.to_owned(),
             description: description.to_owned(),
             public,

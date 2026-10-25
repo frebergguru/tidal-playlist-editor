@@ -7,21 +7,24 @@ use egui_kittest::kittest::{NodeT as _, Queryable as _};
 use super::{App, AuthState};
 use crate::api::{ItemKind, ItemRef, Playlist, PlaylistItem, Track, User};
 
-fn test_home() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let home = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-home");
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(home.join("config")).unwrap();
-        std::fs::write(home.join("config/config.toml"), "language = \"English\"\nmotion = \"Reduced\"\n").unwrap();
-        // SAFETY: set once, before any test reads it; only `Paths::new` reads this variable.
-        unsafe { std::env::set_var("TIDAL_EDITOR_HOME", &home) };
+/// A fresh home folder for each test: tests run in parallel and save
+/// settings, caches and the menu entry, so a shared one lets them race.
+fn test_home() -> crate::store::Paths {
+    static WIPE: std::sync::Once = std::sync::Once::new();
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-home");
+    WIPE.call_once(|| {
+        let _ = std::fs::remove_dir_all(&root);
     });
+    let home = root.join(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed).to_string());
+    std::fs::create_dir_all(home.join("config")).unwrap();
+    std::fs::write(home.join("config/config.toml"), "language = \"English\"\nmotion = \"Reduced\"\n").unwrap();
+    crate::store::Paths::in_home(&home)
 }
 
 fn harness() -> Harness<'static, App> {
-    test_home();
-    Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|cc| App::new(cc))
+    let paths = test_home();
+    Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |cc| App::with_paths(cc, paths))
 }
 
 fn item(n: usize, title: &str, available: bool) -> PlaylistItem {
@@ -162,7 +165,7 @@ fn text_scale_persists() {
     let ctx = h.ctx.clone();
     h.state_mut().set_text_scale(&ctx, 1.5);
     h.run();
-    assert_eq!(crate::store::Config::load(&crate::store::Paths::new()).text_scale, 1.5);
+    assert_eq!(crate::store::Config::load(&h.state().paths).text_scale, 1.5);
     h.state_mut().set_text_scale(&ctx, 1.0);
 }
 

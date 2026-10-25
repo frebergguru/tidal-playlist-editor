@@ -11,7 +11,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let tr = app.tr;
     ui.add_space(2.0);
     let ps = app.player.snapshot();
-    if ps.playing && app.preview_status.is_some() {
+    // The player has taken (or failed on) the preview that was loading.
+    if app.preview_status.is_some() && ps.plays > app.preview_plays {
         app.preview_status = None;
     }
     ui.horizontal_wrapped(|ui| {
@@ -19,8 +20,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if ui.add_enabled(ps.playing, egui::Button::new(label)).on_hover_text("Ctrl+Space").clicked() {
             app.player.send(PlayerCmd::TogglePause);
         }
-        if ui.add_enabled(ps.playing, egui::Button::new(tr.stop)).clicked() {
+        // Stop also drops a preview that is still loading.
+        if ui.add_enabled(ps.playing || app.preview_status.is_some(), egui::Button::new(tr.stop)).clicked() {
             app.player.send(PlayerCmd::Stop);
+            app.worker.send(crate::worker::Cmd::StopPreview);
+            app.preview_status = None;
         }
         if let Some(s) = &app.preview_status {
             super::style::busy(ui, app.reduced_motion);

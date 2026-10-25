@@ -8,6 +8,7 @@ use std::sync::{Arc, mpsc};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::api::auth::{self, AuthConfig};
+use crate::api::client::Skipped;
 use crate::api::{
     AccessType, Album, ApiError, Artist, Client, Genre, ItemRef, MixSource, Playlist, PlaylistItem, SearchResults,
     Track, User,
@@ -233,6 +234,8 @@ pub enum Cmd {
         job: Job,
     },
     Preview(Track),
+    /// Drops a preview that is still loading.
+    StopPreview,
     SpotifyRestore(AuthConfig),
     SpotifyLogin(AuthConfig, Job),
     SpotifyLogout,
@@ -316,9 +319,12 @@ pub enum Event {
     LoginFailed(String),
     LoggedOut,
     Playlists(Vec<Playlist>),
+    /// `seq` grows with every read, taken when the read starts: a read that
+    /// started earlier than the list the UI already shows is out of date.
     Items {
         pid: String,
         items: Vec<PlaylistItem>,
+        seq: u64,
     },
     ItemsFailed {
         pid: String,
@@ -410,12 +416,35 @@ struct Ctx {
     player: PlayerHandle,
     spotify: Arc<RwLock<Option<Arc<SpotifyClient>>>>,
     sp_token_path: PathBuf,
+    /// Numbers playlist reads in the order they start (see [`Event::Items`]).
+    read_seq: Arc<std::sync::atomic::AtomicU64>,
+    /// Bumped by every preview request and by Stop; only the latest request plays.
+    preview_seq: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Ctx {
     fn emit(&self, e: Event) {
         let _ = self.tx.send(e);
         (self.repaint)();
+    }
+
+    /// Passes an add result through, telling the user about songs TIDAL could not add.
+    fn added(&self, r: Result<Skipped, ApiError>) -> Result<Skipped, ApiError> {
+        if let Ok(s) = &r
+            && !s.not_found.is_empty()
+        {
+            let tr = crate::i18n::current();
+            self.emit(Event::Error(crate::i18n::fmt(tr.not_available_n, &[&s.not_found.len().to_string()])));
+        }
+        r
+    }
+
+    /// Reads a playlist's items and shows them in the UI.
+    async fn items(&self, c: &Client, pid: &str, cancel: &(dyn Fn() -> bool + Sync)) -> Result<Vec<PlaylistItem>, ApiError> {
+        let seq = self.read_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let items = c.playlist_items(pid, cancel).await?;
+        self.emit(Event::Items { pid: pid.to_owned(), items: items.clone(), seq });
+        Ok(items)
     }
 
     async fn client(&self) -> Result<Arc<Client>, ApiError> {
@@ -469,6 +498,8 @@ impl WorkerHandle {
             player,
             spotify: Arc::new(RwLock::new(None)),
             sp_token_path,
+            read_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            preview_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         std::thread::Builder::new()
             .name("worker".into())
@@ -582,6 +613,7 @@ async fn handle(ctx: Ctx, cmd: Cmd) {
             }
         }
         Cmd::UpdatePlaylist { pid, name, description, access } => {
+            let _g = ctx.write_lock.lock().await;
             let r = async {
                 let c = ctx.client().await?;
                 c.update_playlist(&pid, Some(&name), Some(&description), Some(access)).await?;
@@ -597,6 +629,7 @@ async fn handle(ctx: Ctx, cmd: Cmd) {
             }
         }
         Cmd::DeletePlaylist(pid) => {
+            let _g = ctx.write_lock.lock().await;
             let r = async { ctx.client().await?.delete_playlist(&pid).await }.await;
             match r {
                 Ok(()) => {
@@ -623,6 +656,9 @@ async fn handle(ctx: Ctx, cmd: Cmd) {
             }
         }
         Cmd::Preview(track) => preview(&ctx, track).await,
+        Cmd::StopPreview => {
+            ctx.preview_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         Cmd::SpotifyRestore(cfg) => {
             let Some(tokens) = auth::load_tokens(&ctx.sp_token_path) else { return };
             let client = Arc::new(SpotifyClient::new(cfg, tokens, Some(ctx.sp_token_path.clone())));
@@ -732,9 +768,9 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
             let p = c.create_playlist(&name, &description, access).await?;
             ctx.emit(Event::PlaylistCreated(p.clone()));
             let r = if add.is_empty() {
-                Ok(0)
+                Ok(Skipped::default())
             } else {
-                c.add_items(&p.id, &add, None, false, &ctx.progress(job, add.len()), &cancel).await
+                ctx.added(c.add_items(&p.id, &add, None, false, &ctx.progress(job, add.len()), &cancel).await)
             };
             // Reload even after a failed add, so the UI shows what was written.
             refresh_meta(ctx, &c, &p.id).await;
@@ -744,12 +780,14 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
         }
         Cmd::AddItems { pid, refs, before, skip_dups, .. } => {
             let _g = ctx.write_lock.lock().await;
-            let r =
-                c.add_items(&pid, &refs, before.as_deref(), skip_dups, &ctx.progress(job, refs.len()), &cancel).await;
+            let r = ctx.added(
+                c.add_items(&pid, &refs, before.as_deref(), skip_dups, &ctx.progress(job, refs.len()), &cancel).await,
+            );
             refresh_meta(ctx, &c, &pid).await;
             reload(ctx, &pid).await;
-            let skipped = r?;
-            Ok(Some(Note::Added { n: refs.len() - skipped, skipped }))
+            let s = r?;
+            let n = refs.len().saturating_sub(s.present + s.not_found.len());
+            Ok(Some(Note::Added { n, skipped: s.present }))
         }
         Cmd::RemoveItems { pid, items, .. } => {
             let _g = ctx.write_lock.lock().await;
@@ -766,8 +804,12 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
             let p = ctx.progress(job, steps.max(1));
             let mut base = 0;
             let mut r: Result<(), ApiError> = Ok(());
+            // Songs a target could not take stay in the source, so moving never loses one.
+            let mut keep = std::collections::HashSet::new();
             for pid in &targets {
-                r = c.add_items(pid, &refs, None, skip_dups, &|n| p(base + n), &cancel).await.map(|_| ());
+                r = ctx
+                    .added(c.add_items(pid, &refs, None, skip_dups, &|n| p(base + n), &cancel).await)
+                    .map(|s| keep.extend(s.not_found));
                 refresh_meta(ctx, &c, pid).await;
                 reload(ctx, pid).await;
                 base += refs.len();
@@ -781,23 +823,24 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
                 r = match c.create_playlist(name, "", AccessType::Unlisted).await {
                     Ok(np) => {
                         ctx.emit(Event::PlaylistCreated(np.clone()));
-                        let a = c.add_items(&np.id, &refs, None, false, &|n| p(base + n), &cancel).await;
+                        let a = ctx.added(c.add_items(&np.id, &refs, None, false, &|n| p(base + n), &cancel).await);
                         refresh_meta(ctx, &c, &np.id).await;
                         reload(ctx, &np.id).await;
                         base += refs.len();
-                        a.map(|_| ())
+                        a.map(|s| keep.extend(s.not_found))
                     }
                     Err(e) => Err(e),
                 };
             }
-            if r.is_ok() {
-                r = c.remove_items(&from, &items, &|n| p(base + n), &cancel).await;
+            let moved: Vec<(ItemRef, String)> = items.iter().filter(|(r, _)| !keep.contains(r)).cloned().collect();
+            if r.is_ok() && !moved.is_empty() {
+                r = c.remove_items(&from, &moved, &|n| p(base + n), &cancel).await;
             }
             // The source is reloaded in every case: the UI removed the rows early.
             refresh_meta(ctx, &c, &from).await;
             reload(ctx, &from).await;
             r?;
-            Ok(Some(Note::Removed(items.len())))
+            Ok(Some(Note::Removed(moved.len())))
         }
         Cmd::ApplyOrder { pid, current, order, .. } => {
             let _g = ctx.write_lock.lock().await;
@@ -835,13 +878,12 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
             Ok(Some(Note::Restored))
         }
         Cmd::Duplicate { source, name, .. } => {
-            let items = c.playlist_items(&source.id, &cancel).await?;
-            ctx.emit(Event::Items { pid: source.id.clone(), items: items.clone() });
+            let items = ctx.items(&c, &source.id, &cancel).await?;
             let _g = ctx.write_lock.lock().await;
             let p = c.create_playlist(&name, &source.description, source.access_type).await?;
             ctx.emit(Event::PlaylistCreated(p.clone()));
             let refs: Vec<ItemRef> = items.iter().map(|i| i.r.clone()).collect();
-            let r = c.add_items(&p.id, &refs, None, false, &ctx.progress(job, refs.len()), &cancel).await;
+            let r = ctx.added(c.add_items(&p.id, &refs, None, false, &ctx.progress(job, refs.len()), &cancel).await);
             refresh_meta(ctx, &c, &p.id).await;
             reload(ctx, &p.id).await;
             r?;
@@ -850,9 +892,8 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
         Cmd::Merge { sources, name, dedupe, .. } => {
             let mut refs = Vec::new();
             for s in &sources {
-                let items = c.playlist_items(&s.id, &cancel).await?;
+                let items = ctx.items(&c, &s.id, &cancel).await?;
                 refs.extend(items.iter().map(|i| i.r.clone()));
-                ctx.emit(Event::Items { pid: s.id.clone(), items });
             }
             if dedupe {
                 let mut seen = std::collections::HashSet::new();
@@ -862,7 +903,7 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
             let desc = sources.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(" + ");
             let p = c.create_playlist(&name, &desc, AccessType::Unlisted).await?;
             ctx.emit(Event::PlaylistCreated(p.clone()));
-            let r = c.add_items(&p.id, &refs, None, false, &ctx.progress(job, refs.len()), &cancel).await;
+            let r = ctx.added(c.add_items(&p.id, &refs, None, false, &ctx.progress(job, refs.len()), &cancel).await);
             refresh_meta(ctx, &c, &p.id).await;
             reload(ctx, &p.id).await;
             r?;
@@ -875,8 +916,7 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
                 if cancel() {
                     return Err(ApiError::Cancelled);
                 }
-                let items = c.playlist_items(&p.id, &cancel).await?;
-                ctx.emit(Event::Items { pid: p.id.clone(), items: items.clone() });
+                let items = ctx.items(&c, &p.id, &cancel).await?;
                 let mut bad_rules = std::collections::HashSet::new();
                 if strict {
                     let ids: Vec<String> = items
@@ -953,10 +993,9 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
                 if cancel() {
                     return Err(ApiError::Cancelled);
                 }
-                let items = c.playlist_items(&p.id, &cancel).await?;
-                let videos = items.iter().filter(|i| i.r.kind == crate::api::ItemKind::Video).cloned();
+                let items = ctx.items(&c, &p.id, &cancel).await?;
+                let videos = items.into_iter().filter(|i| i.r.kind == crate::api::ItemKind::Video);
                 found.extend(videos.map(|v| (p.clone(), v)));
-                ctx.emit(Event::Items { pid: p.id.clone(), items });
                 ctx.emit(Event::Progress { job: job.id, done: n + 1, total });
             }
             ctx.emit(Event::Videos(found));
@@ -971,8 +1010,7 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
                 if cancel() {
                     return Err(ApiError::Cancelled);
                 }
-                let items = c.playlist_items(&p.id, &cancel).await?;
-                ctx.emit(Event::Items { pid: p.id.clone(), items: items.clone() });
+                let items = ctx.items(&c, &p.id, &cancel).await?;
                 let todo: Vec<(PlaylistItem, Track)> = items
                     .into_iter()
                     .filter_map(|i| {
@@ -1010,8 +1048,7 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
                 if cancel() {
                     return Err(ApiError::Cancelled);
                 }
-                let items = c.playlist_items(&pid, &cancel).await?;
-                ctx.emit(Event::Items { pid, items });
+                ctx.items(&c, &pid, &cancel).await?;
                 ctx.emit(Event::Progress { job: job.id, done: n + 1, total });
             }
             Ok(None)
@@ -1041,7 +1078,7 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
             let _g = ctx.write_lock.lock().await;
             let p = c.create_playlist(&name, &description, AccessType::Unlisted).await?;
             ctx.emit(Event::PlaylistCreated(p.clone()));
-            let r = c.add_items(&p.id, &refs, None, false, &ctx.progress(job, refs.len()), &cancel).await;
+            let r = ctx.added(c.add_items(&p.id, &refs, None, false, &ctx.progress(job, refs.len()), &cancel).await);
             refresh_meta(ctx, &c, &p.id).await;
             reload(ctx, &p.id).await;
             r?;
@@ -1073,9 +1110,8 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
                 if cancel() {
                     return Err(ApiError::Cancelled);
                 }
-                let items = c.playlist_items(&p.id, &cancel).await?;
+                let items = ctx.items(&c, &p.id, &cancel).await?;
                 have.extend(items.iter().filter_map(|i| i.track.as_ref()).flat_map(recommend::keys));
-                ctx.emit(Event::Items { pid: p.id.clone(), items });
                 tick();
             }
             let wants = if per_genre { vec![count; genres.len()] } else { generate::split(count, genres.len()) };
@@ -1101,7 +1137,7 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
                 let p = c.create_playlist(&name, &description, AccessType::Unlisted).await?;
                 ctx.emit(Event::PlaylistCreated(p.clone()));
                 let refs: Vec<ItemRef> = tracks.iter().map(Track::item_ref).collect();
-                let r = c.add_items(&p.id, &refs, None, false, &|_| {}, &cancel).await;
+                let r = ctx.added(c.add_items(&p.id, &refs, None, false, &|_| {}, &cancel).await);
                 refresh_meta(ctx, &c, &p.id).await;
                 reload(ctx, &p.id).await;
                 r?;
@@ -1136,23 +1172,28 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
             let _g = ctx.write_lock.lock().await;
             let total = swaps.len();
             // Only originals whose replacement was really added get removed, so
-            // a cancel or an error never loses a song without a substitute.
-            let mut added = 0;
+            // a cancel, an error or a replacement TIDAL cannot add never loses a
+            // song without a substitute.
+            let mut old: Vec<(ItemRef, String)> = Vec::new();
             let mut failed = None;
-            for (n, (old, new)) in swaps.iter().enumerate() {
+            let mut stopped = false;
+            let mut missing = Skipped::default();
+            for (n, (o, new)) in swaps.iter().enumerate() {
                 if cancel() {
+                    stopped = true;
                     break;
                 }
-                if let Err(e) = c.add_items(&pid, &[new.item_ref()], Some(&old.item_id), false, &|_| {}, &cancel).await
-                {
-                    failed = Some(e);
-                    break;
+                match c.add_items(&pid, &[new.item_ref()], Some(&o.item_id), false, &|_| {}, &cancel).await {
+                    Ok(s) if !s.not_found.is_empty() => missing.not_found.extend(s.not_found),
+                    Ok(_) => old.push((o.r.clone(), o.item_id.clone())),
+                    Err(e) => {
+                        failed = Some(e);
+                        break;
+                    }
                 }
-                added += 1;
                 ctx.emit(Event::Progress { job: job.id, done: n + 1, total: total * 2 });
             }
-            let old: Vec<(ItemRef, String)> =
-                swaps[..added].iter().map(|(o, _)| (o.r.clone(), o.item_id.clone())).collect();
+            let _ = ctx.added(Ok(missing));
             let removed = c
                 .remove_items(
                     &pid,
@@ -1167,10 +1208,10 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
             if let Some(e) = failed {
                 return Err(e);
             }
-            if added < total {
+            if stopped {
                 return Err(ApiError::Cancelled);
             }
-            Ok(Some(Note::Replaced(total)))
+            Ok(Some(Note::Replaced(old.len())))
         }
         Cmd::Match { playlists, .. } => {
             let total: usize = playlists.iter().map(|p| p.rows.len()).sum();
@@ -1220,8 +1261,7 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
             let mut sources = Vec::new();
             let mut skipped = 0;
             for p in &playlists {
-                let items = c.playlist_items(&p.id, &cancel).await?;
-                ctx.emit(Event::Items { pid: p.id.clone(), items: items.clone() });
+                let items = ctx.items(&c, &p.id, &cancel).await?;
                 let mut rows = Vec::new();
                 for it in &items {
                     match it.track.as_ref().or_else(|| known.get(&it.r.id)) {
@@ -1250,8 +1290,7 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
             let mut data = Vec::new();
             let total = playlists.len();
             for (n, p) in playlists.into_iter().enumerate() {
-                let items = c.playlist_items(&p.id, &cancel).await?;
-                ctx.emit(Event::Items { pid: p.id.clone(), items: items.clone() });
+                let items = ctx.items(&c, &p.id, &cancel).await?;
                 data.push((p, items));
                 ctx.emit(Event::Progress { job: job.id, done: n + 1, total });
             }
@@ -1429,7 +1468,7 @@ async fn restore(ctx: &Ctx, c: &Client, pid: &str, target: &[ItemRef], job: &Job
         c.remove_items(pid, &remove, &|n| p(n), &cancel).await?;
     }
     if !d.missing.is_empty() {
-        c.add_items(pid, &d.missing, None, false, &|n| p(remove.len() + n), &cancel).await?;
+        ctx.added(c.add_items(pid, &d.missing, None, false, &|n| p(remove.len() + n), &cancel).await)?;
     }
     let now = c.playlist_items(pid, &cancel).await?;
     let order = analysis::order_for(&now, target);
@@ -1579,10 +1618,9 @@ async fn genre_songs(
 }
 
 async fn reload(ctx: &Ctx, pid: &str) {
-    let r = async { ctx.client().await?.playlist_items(pid, &|| false).await }.await;
-    match r {
-        Ok(items) => ctx.emit(Event::Items { pid: pid.to_owned(), items }),
-        Err(e) => ctx.emit(Event::ItemsFailed { pid: pid.to_owned(), error: err_text(&e) }),
+    let r = async { ctx.items(&*ctx.client().await?, pid, &|| false).await }.await;
+    if let Err(e) = r {
+        ctx.emit(Event::ItemsFailed { pid: pid.to_owned(), error: err_text(&e) });
     }
 }
 
@@ -1593,6 +1631,7 @@ async fn refresh_meta(ctx: &Ctx, c: &Client, pid: &str) {
 }
 
 async fn preview(ctx: &Ctx, track: Track) {
+    let seq = ctx.preview_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     if track.kind == crate::api::ItemKind::Video {
         return ctx.emit(Event::PreviewFailed(PreviewFail::Video));
     }
@@ -1617,6 +1656,10 @@ async fn preview(ctx: &Ctx, track: Track) {
         Ok::<_, ApiError>(Ok((bytes, m.full, rep.codecs.clone())))
     }
     .await;
+    // A newer preview or Stop came while this one loaded: it must not play or report.
+    if ctx.preview_seq.load(std::sync::atomic::Ordering::SeqCst) != seq {
+        return;
+    }
     match r {
         Ok(Ok((bytes, full, codecs))) => {
             let hint = if codecs.contains("flac") && !bytes.starts_with(b"\0\0") { "flac" } else { "mp4" };
@@ -1729,7 +1772,7 @@ mod live {
         fn items(&mut self, pid: &str) -> Vec<PlaylistItem> {
             self.h.send(Cmd::LoadItems(pid.to_owned()));
             self.until("load items", |e| match e {
-                Event::Items { pid: p, items } if p == pid => Some(items.clone()),
+                Event::Items { pid: p, items, .. } if p == pid => Some(items.clone()),
                 Event::ItemsFailed { error, .. } => panic!("load items: {error}"),
                 _ => None,
             })

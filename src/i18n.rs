@@ -406,6 +406,7 @@ strings! {
     playlist_deleted => "Playlist deleted.", "Spillelisten er slettet.";
     restored => "Playlist restored.", "Spillelisten er gjenopprettet.";
     replaced_n => "Replaced {0} items.", "Erstattet {0} elementer.";
+    not_available_n => "{0} songs are not available on TIDAL and were not added.", "{0} sanger er ikke tilgjengelige på TIDAL og ble ikke lagt til.";
     favourited_n => "Added {0} to My Collection.", "La {0} til i Min samling.";
     unfavourited_n => "Removed {0} from My Collection.", "Fjernet {0} fra Min samling.";
     could_not_load_items => "Could not load the playlist", "Kunne ikke laste spillelisten";
