@@ -231,3 +231,40 @@ fn settings_fields_accept_pasted_text() {
     h.key_press(Key::Escape);
     h.run();
 }
+
+#[test]
+fn removes_all_geo_restricted_at_once() {
+    use crate::worker::{Reason, UnavailableHit};
+    let mut h = harness();
+    logged_in(&mut h);
+    {
+        let app = h.state_mut();
+        let items = app.items["p1"].clone();
+        let hit = |n: usize, reason| UnavailableHit {
+            pid: "p1".into(),
+            playlist: "Road trip".into(),
+            item: items[n].clone(),
+            reason,
+            known: items[n].track.clone(),
+        };
+        let hits = vec![hit(0, Reason::GeoRestricted), hit(1, Reason::GeoRestricted), hit(2, Reason::Missing)];
+        app.open_dialog(super::Dialog::unavailable_results(hits));
+    }
+    h.run();
+    h.get_by_label("Remove all GEO_RESTRICTED (2)").click();
+    h.run();
+    h.get_by_label_contains("Remove 2 GEO_RESTRICTED songs from 1 playlists?");
+    h.get_by_label("Yes, remove").click();
+    h.run();
+    let left: Vec<String> = h.state().items["p1"].iter().map(|i| i.item_id.clone()).collect();
+    assert_eq!(left, vec!["occ3"], "both GEO_RESTRICTED songs removed, the other one kept");
+    match &h.state().dialog {
+        Some(super::Dialog::Unavailable(u)) => {
+            assert_eq!(u.hits.len(), 1);
+            assert_eq!((u.remove.len(), u.use_repl.len()), (1, 1));
+        }
+        _ => panic!("results stay open for the remaining songs"),
+    }
+    assert!(h.query_by_label_contains("Remove all GEO_RESTRICTED").is_none());
+    assert_eq!(h.state().undo["p1"].len(), 1, "undoable");
+}

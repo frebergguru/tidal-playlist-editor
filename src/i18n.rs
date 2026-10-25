@@ -283,6 +283,12 @@ strings! {
     geo_check => "Also check playback in your location — finds «Content is unavailable in your location (GEO_RESTRICTED)». Slow: one request per song.",
         "Sjekk også avspilling der du er — finner «Content is unavailable in your location (GEO_RESTRICTED)». Tregt: én forespørsel per sang.";
     reason_geo => "not playable in your location (GEO_RESTRICTED)", "kan ikke spilles der du er (GEO_RESTRICTED)";
+    remove_all_geo => "Remove all GEO_RESTRICTED ({0})", "Fjern alle GEO_RESTRICTED ({0})";
+    confirm_remove_geo => "Remove {0} GEO_RESTRICTED songs from {1} playlists? Ctrl+Z in each playlist undoes it.",
+        "Fjerne {0} GEO_RESTRICTED-sanger fra {1} spillelister? Ctrl+Z i hver spilleliste angrer.";
+    yes_remove => "Yes, remove", "Ja, fjern";
+    no => "No", "Nei";
+    removed_geo_n => "Removing {0} GEO_RESTRICTED songs from {1} playlists.", "Fjerner {0} GEO_RESTRICTED-sanger fra {1} spillelister.";
     reason_no_rule => "no streaming rights in your country", "ingen strømmerettigheter i landet ditt";
 
     compare_by => "Count as duplicates:", "Regn som duplikater:";

@@ -23,6 +23,8 @@ pub struct UnavailableDialog {
     pub all: bool,
     pub strict: bool,
     pub geo: bool,
+    /// Waiting for the user to confirm «Remove all GEO_RESTRICTED».
+    pub confirm_geo: bool,
     pub current: Option<String>,
     pub hits: Vec<UnavailableHit>,
     pub remove: Vec<bool>,
@@ -156,6 +158,7 @@ impl Dialog {
             all: current.is_none(),
             strict,
             geo,
+            confirm_geo: false,
             current,
             hits: Vec::new(),
             remove: Vec::new(),
@@ -171,6 +174,7 @@ impl Dialog {
             all: false,
             strict: false,
             geo: false,
+            confirm_geo: false,
             current: None,
             remove: vec![true; n],
             hits,
@@ -783,6 +787,15 @@ fn unavailable(app: &mut App, ctx: &egui::Context, u: &mut UnavailableDialog, fi
         return if ok || cancel || esc { Outcome::Close } else { Outcome::Keep };
     }
     let mut find = false;
+    let mut remove_geo = false;
+    let geo_count = u.hits.iter().filter(|h| matches!(h.reason, Reason::GeoRestricted)).count();
+    let geo_lists = u
+        .hits
+        .iter()
+        .filter(|h| matches!(h.reason, Reason::GeoRestricted))
+        .map(|h| h.pid.as_str())
+        .collect::<HashSet<_>>()
+        .len();
     let (esc, (ok, cancel)) = frame(ctx, "unav", tr.unavailable_songs, |ui| {
         if u.hits.is_empty() {
             ui.label(tr.no_unavailable);
@@ -811,7 +824,30 @@ fn unavailable(app: &mut App, ctx: &egui::Context, u: &mut UnavailableDialog, fi
                 ui.spinner();
                 ui.label(tr.searching);
             }
+            if geo_count > 0 && !u.confirm_geo {
+                let b = ui.button(i18n::fmt(tr.remove_all_geo, &[&geo_count.to_string()]));
+                if b.clicked() {
+                    u.confirm_geo = true;
+                }
+            }
         });
+        if u.confirm_geo {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(i18n::fmt(tr.confirm_remove_geo, &[&geo_count.to_string(), &geo_lists.to_string()]))
+                        .strong(),
+                );
+                let yes = ui.button(tr.yes_remove);
+                yes.request_focus();
+                if yes.clicked() {
+                    remove_geo = true;
+                    u.confirm_geo = false;
+                }
+                if ui.button(tr.no).clicked() {
+                    u.confirm_geo = false;
+                }
+            });
+        }
         egui::ScrollArea::vertical().max_height(ui.available_height() - 80.0).show(ui, |ui| {
             let mut last_pl = String::new();
             for (n, h) in u.hits.iter().enumerate() {
@@ -843,6 +879,25 @@ fn unavailable(app: &mut App, ctx: &egui::Context, u: &mut UnavailableDialog, fi
         let n = u.remove.iter().filter(|r| **r).count();
         ok_cancel(ui, tr, &i18n::fmt(tr.apply_to_n, &[&n.to_string()]), n > 0)
     });
+    if remove_geo {
+        let mut by_pid: HashMap<String, HashSet<String>> = HashMap::new();
+        for h in u.hits.iter().filter(|h| matches!(h.reason, Reason::GeoRestricted)) {
+            by_pid.entry(h.pid.clone()).or_default().insert(h.item.item_id.clone());
+        }
+        for (pid, ids) in &by_pid {
+            app.remove_from_playlist(pid, ids);
+        }
+        // Keep the remaining hits (and their aligned choices) in the list.
+        let keep: Vec<bool> = u.hits.iter().map(|h| !matches!(h.reason, Reason::GeoRestricted)).collect();
+        let kept = |v: Vec<bool>| v.into_iter().zip(&keep).filter_map(|(x, k)| k.then_some(x)).collect();
+        u.remove = kept(std::mem::take(&mut u.remove));
+        u.use_repl = kept(std::mem::take(&mut u.use_repl));
+        if let Some(r) = u.replacements.take() {
+            u.replacements = Some(r.into_iter().zip(&keep).filter_map(|(x, k)| k.then_some(x)).collect());
+        }
+        u.hits.retain(|h| !matches!(h.reason, Reason::GeoRestricted));
+        app.note(i18n::fmt(tr.removed_geo_n, &[&geo_count.to_string(), &by_pid.len().to_string()]));
+    }
     if find {
         u.searching = true;
         let job = app.start_job(tr.find_replacements, JobKind::Replacements);
