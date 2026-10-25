@@ -211,6 +211,11 @@ pub enum Dialog {
     Videos(Box<VideosDialog>),
     Better(Box<BetterDialog>),
     Across(Box<AcrossDialog>),
+    /// The user's mixes (`None` while loading) and the ids ticked to save.
+    Mixes {
+        mixes: Option<Vec<Playlist>>,
+        picked: HashSet<String>,
+    },
     Trim {
         pid: String,
         minutes: u32,
@@ -730,6 +735,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         Dialog::Videos(v) => videos(app, ctx, v, first),
         Dialog::Better(b) => better(app, ctx, b, first),
         Dialog::Across(a) => across(app, ctx, a, first),
+        Dialog::Mixes { mixes, picked } => save_mixes(app, ctx, mixes.as_deref(), picked, first),
         Dialog::Trim { pid, minutes } => trim(app, ctx, pid, minutes, first),
         Dialog::Duplicates { pid, mode, groups, remove, seen } => {
             // The list changed under the dialog (reload, undo): work the groups
@@ -1332,6 +1338,61 @@ fn across(app: &mut App, ctx: &egui::Context, a: &mut AcrossDialog, first: bool)
         }
         for (pid, ids) in by_pid {
             app.remove_from_playlist(&pid, &ids);
+        }
+    }
+    if ok || cancel || esc { Outcome::Close } else { Outcome::Keep }
+}
+
+/// «Save my mixes as playlists»: tick mixes; each becomes a new playlist.
+fn save_mixes(
+    app: &mut App,
+    ctx: &egui::Context,
+    mixes: Option<&[Playlist]>,
+    picked: &mut HashSet<String>,
+    first: bool,
+) -> Outcome {
+    let tr = app.tr;
+    let loading = app.job_running(&JobKind::Mixes);
+    let (esc, (ok, cancel)) = frame(ctx, "mixes", tr.save_mixes, |ui| {
+        ui.label(tr.mixes_explain);
+        match mixes {
+            None if loading => {
+                ui.horizontal(|ui| {
+                    super::style::busy(ui, app.reduced_motion);
+                    ui.label(tr.loading_mixes);
+                });
+            }
+            None => {
+                ui.label(RichText::new(format!("⚠ {}", tr.mixes_failed)).strong());
+            }
+            Some([]) => {
+                ui.label(tr.no_mixes);
+            }
+            Some(list) => {
+                egui::ScrollArea::vertical().max_height(ui.available_height() - 80.0).show(ui, |ui| {
+                    for (n, m) in list.iter().enumerate() {
+                        let mut on = picked.contains(&m.id);
+                        let c = ui.checkbox(&mut on, &m.name);
+                        if first && n == 0 {
+                            c.request_focus();
+                        }
+                        if c.changed() {
+                            if on {
+                                picked.insert(m.id.clone());
+                            } else {
+                                picked.remove(&m.id);
+                            }
+                        }
+                    }
+                });
+            }
+        }
+        let n = picked.len();
+        ok_cancel(ui, tr, &i18n::fmt(tr.save_n, &[&n.to_string()]), n > 0)
+    });
+    if ok {
+        for m in mixes.unwrap_or_default().iter().filter(|m| picked.contains(&m.id)) {
+            app.save_mix(m);
         }
     }
     if ok || cancel || esc { Outcome::Close } else { Outcome::Keep }

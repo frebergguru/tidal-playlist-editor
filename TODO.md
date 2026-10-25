@@ -20,11 +20,6 @@ for third-party apps (genres did), so check each one against the live API before
       there is no way to list a user's folders (`/userCollectionFolders` needs `filter[id]`,
       `/userCollectionFolders/me` is 404, and `/userCollectionPlaylists/me` lists only playlists).
       Needs an account with a folder to see where folder ids show up.
-- [ ] **Save Daily / Discovery / New release mixes.** They need the `recommendations.read`
-      scope, which the login now asks for (from 0.2.0+; log out and in again to get it). Still to
-      find out with such a token: where a user's mix ids come from (`/userDailyMixes/me` was 404
-      without the scope).
-
 ## Done
 
 - Release 0.2.0 built (`dist/0.2.0/`, stripped, tests and clippy clean).
@@ -32,7 +27,8 @@ for third-party apps (genres did), so check each one against the live API before
   Note: `/tracks?filter[isrc]=` with several ISRCs returns only one track per ISRC, so the
   lookup is one ISRC per request.
 - Clean versions of explicit songs (swap or remove).
-- Song and artist radio saved as a playlist.
+- Song and artist radio, and the user's own mixes (`/userDailyMixes/me`, `/userDiscoveryMixes/me`,
+  `/userNewReleaseMixes/me` → `relationships/items`; needs `recommendations.read`), saved as playlists.
 - Where is this song, and duplicates across playlists.
 - Trim to a length; popularity sort; song and video counts in the sidebar.
 - Playlist cover image: not possible. `POST /artworks` needs the `w_usr` scope, which the

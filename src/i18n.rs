@@ -196,6 +196,17 @@ strings! {
     radio_name => "Radio: {0}", "Radio: {0}";
     radio_description => "TIDAL's radio for {0}, saved {1}.", "TIDAL-radioen for {0}, lagret {1}.";
     making_radio => "Making a playlist from the radio for {0}", "Lager spilleliste av radioen for {0}";
+    save_mixes_dots => "Save my mixes as playlists…", "Lagre miksene mine som spillelister …";
+    save_mixes => "Save my mixes as playlists", "Lagre miksene mine som spillelister";
+    mixes_explain => "TIDAL changes your mixes every day or week. Tick the ones to keep as they are now: each becomes a new playlist of its own.", "TIDAL bytter ut miksene dine hver dag eller uke. Kryss av dem du vil beholde slik de er nå: hver blir en egen ny spilleliste.";
+    loading_mixes => "Loading your mixes", "Laster inn miksene dine";
+    no_mixes => "No mixes found.", "Fant ingen mikser.";
+    mixes_failed => "Could not load your mixes; see the log.", "Kunne ikke laste inn miksene dine; se loggen.";
+    mix_name => "{0} ({1})", "{0} ({1})";
+    mix_description => "Copy of TIDAL's «{0}», saved {1}.", "Kopi av TIDAL-miksen «{0}», lagret {1}.";
+    save_n => "Save {0}", "Lagre {0}";
+    saving_mix => "Saving «{0}» as a playlist", "Lagrer «{0}» som spilleliste";
+    err_mixes_scope => "TIDAL did not give access to your mixes. Log out and log in again, and make sure the app has the scope recommendations.read in the TIDAL developer portal.", "TIDAL ga ikke tilgang til miksene dine. Logg ut og inn igjen, og sjekk at appen har tilgangen recommendations.read i utviklerportalen til TIDAL.";
     err_no_radio => "TIDAL has no radio for this.", "TIDAL har ingen radio for dette.";
     across_dots => "Duplicates across playlists…", "Duplikater på tvers av spillelister …";
     across_title => "Duplicates across playlists", "Duplikater på tvers av spillelister";

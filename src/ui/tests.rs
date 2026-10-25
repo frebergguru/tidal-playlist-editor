@@ -793,3 +793,34 @@ fn trim_keeps_about_the_chosen_length() {
     assert!(h.state().dialog.is_none());
     assert!(!h.state().items["p1"].iter().any(|i| i.item_id == "occ2"));
 }
+
+#[test]
+fn mixes_are_ticked_and_saved_as_playlists() {
+    let mut h = harness();
+    logged_in(&mut h);
+    let mix = |id: &str, name: &str| Playlist { id: id.into(), name: name.into(), owned: false, ..Default::default() };
+    h.state_mut().open_dialog(super::Dialog::Mixes {
+        mixes: Some(vec![mix("m1", "My Mix 1"), mix("m2", "My New Arrivals")]),
+        picked: Default::default(),
+    });
+    h.run();
+    assert!(h.get_by_role_and_label(Role::CheckBox, "My Mix 1").accesskit_node().is_focused());
+    h.get_by_role_and_label(Role::CheckBox, "My New Arrivals").click();
+    h.run();
+    h.get_by_label("Save 1").click();
+    h.run();
+    assert!(h.state().dialog.is_none());
+    wait_for_log(&mut h, "Saving «My New Arrivals» as a playlist");
+}
+
+#[test]
+fn mixes_that_fail_to_load_say_so() {
+    let mut h = harness();
+    logged_in(&mut h);
+    h.state_mut().open_dialog(super::Dialog::Mixes { mixes: None, picked: Default::default() });
+    h.run();
+    h.get_by_label_contains("Could not load your mixes");
+    h.key_press(Key::Escape);
+    h.run();
+    assert!(h.state().dialog.is_none());
+}

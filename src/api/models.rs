@@ -205,6 +205,14 @@ impl Playlist {
     }
 }
 
+/// A mix to copy into a new playlist: TIDAL's radio for a track or an artist,
+/// or a mix playlist (the user's own mixes).
+#[derive(Clone, Debug, PartialEq)]
+pub enum MixSource {
+    Radio(RadioSeed),
+    Playlist(String),
+}
+
 /// Whose radio to read: a track's or an artist's.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RadioSeed {

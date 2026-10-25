@@ -9,7 +9,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::api::auth::{self, AuthConfig};
 use crate::api::{
-    AccessType, Album, ApiError, Artist, Client, Genre, ItemRef, Playlist, PlaylistItem, RadioSeed, SearchResults,
+    AccessType, Album, ApiError, Artist, Client, Genre, ItemRef, MixSource, Playlist, PlaylistItem, SearchResults,
     Track, User,
 };
 use crate::ops::analysis;
@@ -194,9 +194,11 @@ pub enum Cmd {
         mode: BetterMode,
         job: Job,
     },
-    /// A new playlist `name` with the songs of TIDAL's radio for `seed`.
-    SaveRadio {
-        seed: RadioSeed,
+    /// The user's own mixes, reported as [`Event::Mixes`].
+    LoadMixes(Job),
+    /// A new playlist `name` with the playable songs of a radio or mix.
+    SaveMix {
+        source: MixSource,
         name: String,
         description: String,
         job: Job,
@@ -360,6 +362,8 @@ pub enum Event {
     Unavailable(Vec<UnavailableHit>),
     /// (video item id, its audio track if found).
     MusicVersions(Vec<(String, Option<Track>)>),
+    /// The user's own mixes (as playlists).
+    Mixes(Vec<Playlist>),
     Better {
         mode: BetterMode,
         hits: Vec<BetterHit>,
@@ -681,7 +685,8 @@ async fn run_job(ctx: &Ctx, cmd: Cmd) {
         | Cmd::Recommend { job, .. }
         | Cmd::FindVideos { job, .. }
         | Cmd::FindBetter { job, .. }
-        | Cmd::SaveRadio { job, .. }
+        | Cmd::SaveMix { job, .. }
+        | Cmd::LoadMixes(job)
         | Cmd::LoadAll { job, .. }
         | Cmd::FindMusic { job, .. }
         | Cmd::Generate { job, .. }
@@ -1011,9 +1016,23 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
             }
             Ok(None)
         }
-        Cmd::SaveRadio { seed, name, description, .. } => {
+        Cmd::LoadMixes(_) => {
             let tr = crate::i18n::current();
-            let mix = c.radio(&seed).await?.ok_or_else(|| ApiError::Other(tr.err_no_radio.into()))?;
+            let mixes = c.my_mixes().await.map_err(|e| match e.status() {
+                Some(401 | 403 | 404) => ApiError::Other(tr.err_mixes_scope.into()),
+                _ => e,
+            })?;
+            ctx.emit(Event::Mixes(mixes));
+            Ok(None)
+        }
+        Cmd::SaveMix { source, name, description, .. } => {
+            let tr = crate::i18n::current();
+            let mix = match source {
+                MixSource::Radio(seed) => {
+                    c.radio(&seed).await?.ok_or_else(|| ApiError::Other(tr.err_no_radio.into()))?
+                }
+                MixSource::Playlist(id) => id,
+            };
             let items = c.playlist_items(&mix, &cancel).await?;
             let refs: Vec<ItemRef> = items.iter().filter(|i| i.available()).map(|i| i.r.clone()).collect();
             if refs.is_empty() {

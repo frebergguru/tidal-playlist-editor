@@ -15,7 +15,7 @@ use std::sync::Arc;
 use egui::{Key, KeyboardShortcut, Modifiers};
 
 use crate::api::auth::AuthConfig;
-use crate::api::{Album, Artist, ItemRef, Playlist, PlaylistItem, RadioSeed, SearchResults, Track, User};
+use crate::api::{Album, Artist, ItemRef, MixSource, Playlist, PlaylistItem, RadioSeed, SearchResults, Track, User};
 use crate::i18n::{self, Tr};
 use crate::ops::analysis::SortKey;
 use crate::ops::recommend::{self, Recommendation};
@@ -100,6 +100,7 @@ pub enum JobKind {
     Match,
     Export,
     LoadAll,
+    Mixes,
 }
 
 pub struct JobInfo {
@@ -431,13 +432,26 @@ impl App {
         self.open_dialog(Dialog::across(only));
     }
 
+    /// Saves the user's mix `mix` as a new playlist named after it and today.
+    pub fn save_mix(&mut self, mix: &Playlist) {
+        let tr = self.tr;
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let job = self.start_job(i18n::fmt(tr.saving_mix, &[&mix.name]), JobKind::Plain);
+        self.worker.send(Cmd::SaveMix {
+            source: MixSource::Playlist(mix.id.clone()),
+            name: i18n::fmt(tr.mix_name, &[&mix.name, &today]),
+            description: i18n::fmt(tr.mix_description, &[&mix.name, &today]),
+            job,
+        });
+    }
+
     /// Saves TIDAL's radio for a song or artist (`what` names it) as a new playlist.
     pub fn save_radio(&mut self, seed: RadioSeed, what: &str) {
         let tr = self.tr;
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let job = self.start_job(i18n::fmt(tr.making_radio, &[what]), JobKind::Plain);
-        self.worker.send(Cmd::SaveRadio {
-            seed,
+        self.worker.send(Cmd::SaveMix {
+            source: MixSource::Radio(seed),
             name: i18n::fmt(tr.radio_name, &[what]),
             description: i18n::fmt(tr.radio_description, &[what, &today]),
             job,
@@ -681,6 +695,11 @@ impl App {
                 self.open_result(Dialog::unavailable_results(hits));
             }
             Event::Videos(hits) => self.open_result(Dialog::videos_results(hits)),
+            Event::Mixes(list) => {
+                if let Some(Dialog::Mixes { mixes, .. }) = &mut self.dialog {
+                    *mixes = Some(list);
+                }
+            }
             Event::Better { mode, hits } => self.open_result(Dialog::better_results(mode, hits)),
             Event::MusicVersions(found) => {
                 if let Some(Dialog::Videos(v)) = &mut self.dialog {
@@ -988,6 +1007,11 @@ impl App {
                 }
                 if ui.add_enabled(logged_in, egui::Button::new(tr.clean_versions_dots)).clicked() {
                     self.open_dialog(Dialog::better_setup(BetterMode::Clean, self.current.clone()));
+                }
+                if ui.add_enabled(logged_in, egui::Button::new(tr.save_mixes_dots)).clicked() {
+                    let job = self.start_job(tr.loading_mixes, JobKind::Mixes);
+                    self.worker.send(Cmd::LoadMixes(job));
+                    self.open_dialog(Dialog::Mixes { mixes: None, picked: HashSet::new() });
                 }
                 if ui.add_enabled(logged_in, egui::Button::new(tr.find_videos_dots)).clicked() {
                     self.open_dialog(Dialog::videos_setup(self.current.clone()));

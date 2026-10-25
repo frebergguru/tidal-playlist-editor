@@ -643,6 +643,31 @@ impl Client {
         }
     }
 
+    /// The user's own mixes (My Mix 1–8, My Daily Discovery, My New Arrivals)
+    /// as playlists. Needs the `recommendations.read` scope.
+    pub async fn my_mixes(&self) -> Result<Vec<Playlist>> {
+        let mut out = Vec::new();
+        let mut refused = None;
+        for kind in ["userDailyMixes", "userDiscoveryMixes", "userNewReleaseMixes"] {
+            let query = vec![self.cc(), ("include".into(), "items".into())];
+            match self.get_all(&format!("/{kind}/me/relationships/items"), &query, &|| false).await {
+                Ok(doc) => out.extend(doc.data_array().iter().filter_map(|l| {
+                    let (t, id) = (jsonapi::str_of(l, "type")?, jsonapi::str_of(l, "id")?);
+                    let mut p = jsonapi::playlist_from(doc.get(&t, &id)?)?;
+                    p.owned = false;
+                    Some(p)
+                })),
+                // Without the scope TIDAL answers 404 (or 401/403).
+                Err(e) if matches!(e.status(), Some(401 | 403 | 404)) => refused = Some(e),
+                Err(e) => return Err(e),
+            }
+        }
+        match refused {
+            Some(e) if out.is_empty() => Err(e),
+            _ => Ok(out),
+        }
+    }
+
     // --------------------------------------------------------------- genres
 
     /// Playlists (mostly TIDAL's own) found by a search, best match first.
@@ -1042,6 +1067,36 @@ mod tests {
         assert!(c.playback_restriction("flaky").await.is_err(), "other errors are reported, not hidden");
         let e = c.track_manifest("geo").await.unwrap_err();
         assert_eq!(e.code(), Some("GEO_RESTRICTED"));
+    }
+
+    #[tokio::test]
+    async fn my_mixes_from_all_three_kinds() {
+        let server = MockServer::start().await;
+        let mixes = |id: &str, name: &str| {
+            json!({"data": [{"type": "playlists", "id": id}],
+                   "included": [{"type": "playlists", "id": id, "attributes": {"name": name, "playlistType": "MIX"}}]})
+        };
+        for (kind, id, name) in [
+            ("userDailyMixes", "d1", "My Mix 1"),
+            ("userDiscoveryMixes", "x1", "My Daily Discovery"),
+            ("userNewReleaseMixes", "n1", "My New Arrivals"),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(format!("/v2/{kind}/me/relationships/items")))
+                .and(query_param("include", "items"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(mixes(id, name)))
+                .mount(&server)
+                .await;
+        }
+        let c = client(&server, far());
+        let got = c.my_mixes().await.unwrap();
+        let names: Vec<&str> = got.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["My Mix 1", "My Daily Discovery", "My New Arrivals"]);
+        assert!(got.iter().all(|p| !p.owned), "mixes are TIDAL's, not the user's");
+        // Without the scope every kind is 404: that is an error, not «no mixes».
+        let bare = MockServer::start().await;
+        Mock::given(method("GET")).respond_with(ResponseTemplate::new(404)).mount(&bare).await;
+        assert_eq!(client(&bare, far()).my_mixes().await.unwrap_err().status(), Some(404));
     }
 
     #[tokio::test]
