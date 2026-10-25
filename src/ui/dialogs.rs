@@ -239,6 +239,39 @@ fn labelled_text(ui: &mut egui::Ui, label: &str, value: &mut String, first: bool
     r
 }
 
+/// Text field with a Paste button (Ctrl+V also works) for long values such as
+/// the Client ID. Secrets are hidden unless «Show» is ticked.
+fn pasteable_text(ui: &mut egui::Ui, tr: &Tr, label: &str, value: &mut String, secret: bool) {
+    let l = ui.label(label);
+    let show_id = ui.scope_id().with(("show-secret", label));
+    let mut show = ui.data(|d| d.get_temp::<bool>(show_id)).unwrap_or(false);
+    ui.horizontal(|ui| {
+        let reserve = if secret { 190.0 } else { 90.0 };
+        ui.add(
+            egui::TextEdit::singleline(value)
+                .password(secret && !show)
+                .desired_width((ui.available_width() - reserve).max(120.0)),
+        )
+        .labelled_by(l.id);
+        let paste = ui.button(tr.paste);
+        paste.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{}: {label}", tr.paste)));
+        if paste.clicked() {
+            match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+                Ok(text) => *value = text.trim().to_owned(),
+                Err(e) => {
+                    ui.data_mut(|d| d.insert_temp(show_id.with("err"), format!("{}: {e}", tr.paste_failed)));
+                }
+            }
+        }
+        if secret && ui.checkbox(&mut show, tr.show_secret).changed() {
+            ui.data_mut(|d| d.insert_temp(show_id, show));
+        }
+    });
+    if let Some(err) = ui.data(|d| d.get_temp::<String>(show_id.with("err"))) {
+        ui.label(RichText::new(format!("⚠ {err}")).strong());
+    }
+}
+
 fn access_radio(ui: &mut egui::Ui, tr: &Tr, access: &mut AccessType) {
     ui.label(tr.visibility);
     ui.horizontal(|ui| {
@@ -673,9 +706,10 @@ fn settings(app: &mut App, ctx: &egui::Context, f: &mut SettingsForm, first: boo
             ui.separator();
             ui.strong(tr.tidal_api);
             ui.label(tr.api_explain);
-            labelled_text(ui, tr.client_id, &mut c.client_id, false, false);
-            labelled_text(ui, tr.client_secret_optional, &mut c.client_secret, false, true);
-            labelled_text(ui, tr.redirect_uri, &mut c.redirect_uri, false, false);
+            pasteable_text(ui, tr, tr.client_id, &mut c.client_id, false);
+            pasteable_text(ui, tr, tr.client_secret_optional, &mut c.client_secret, true);
+            pasteable_text(ui, tr, tr.redirect_uri, &mut c.redirect_uri, false);
+            ui.label(RichText::new(tr.paste_hint).weak());
             ui.hyperlink_to(tr.developer_portal, "https://developer.tidal.com/dashboard");
         });
         let valid = url::Url::parse(c.redirect_uri.trim()).is_ok_and(|u| u.port_or_known_default().is_some());

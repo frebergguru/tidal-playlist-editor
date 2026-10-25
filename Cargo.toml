@@ -8,7 +8,7 @@ license = "MIT"
 publish = false
 
 [dependencies]
-eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "links", "wayland", "x11"] }
 egui = "0.37"
 egui_extras = "0.37"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "query", "form", "http2", "charset"] }
@@ -28,6 +28,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sha2 = "0.11"
 base64 = "0.23"
 url = "2.5"
+arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal", "pollster"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 strsim = "0.11"

@@ -349,6 +349,10 @@ strings! {
     api_explain => "These come from your own app in the TIDAL developer portal. They are stored only on this computer.", "Disse kommer fra din egen app i TIDALs utviklerportal. De lagres bare på denne datamaskinen.";
     client_id => "Client ID", "Client ID";
     client_secret_optional => "Client secret (usually not needed)", "Klienthemmelighet (trengs vanligvis ikke)";
+    paste => "Paste", "Lim inn";
+    paste_failed => "Could not read the clipboard", "Kunne ikke lese utklippstavlen";
+    show_secret => "Show", "Vis";
+    paste_hint => "Tip: Ctrl+V pastes into any text field.", "Tips: Ctrl+V limer inn i alle tekstfelt.";
     redirect_uri => "Redirect URI (must match the app exactly)", "Omdirigerings-URI (må være lik appens)";
     redirect_invalid => "The redirect URI must be a full address with a port, for example http://localhost:8765/callback", "Omdirigerings-URI-en må være en hel adresse med port, for eksempel http://localhost:8765/callback";
     api_changed_relogin => "API settings changed. Log out and in again to use them.", "API-innstillingene er endret. Logg ut og inn igjen for å bruke dem.";

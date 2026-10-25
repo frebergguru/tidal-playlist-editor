@@ -208,3 +208,26 @@ fn screenshots() {
     app.cfg.theme = crate::store::ThemeChoice::System;
     app.restyle(&ctx);
 }
+
+#[test]
+fn settings_fields_accept_pasted_text() {
+    let mut h = harness();
+    h.state_mut().auth = AuthState::LoggedOut;
+    h.run();
+    h.get_by_label("API settings…").click();
+    h.run();
+    h.get_by_role_and_label(Role::Button, "Paste: Client ID");
+    h.get_by_role_and_label(Role::Button, "Paste: Client secret (usually not needed)");
+    // Ctrl+V reaches egui as a Paste event; make sure the field takes it.
+    let field = h.get_by_role_and_label(Role::TextInput, "Client ID");
+    field.focus();
+    h.run();
+    h.event(egui::Event::Paste("  abc123-long-client-id  ".into()));
+    h.run();
+    match &h.state().dialog {
+        Some(super::Dialog::Settings(f)) => assert_eq!(f.cfg.client_id, "  abc123-long-client-id  "),
+        _ => panic!("settings dialog should still be open"),
+    }
+    h.key_press(Key::Escape);
+    h.run();
+}
