@@ -37,6 +37,14 @@ def licence_files(pkg):
         if f.lower().startswith(LICENSE_PREFIXES) and os.path.isfile(os.path.join(d, f)):
             with open(os.path.join(d, f), encoding="utf-8", errors="replace") as fh:
                 out.append((f, fh.read().strip()))
+    # Crates that embed fonts (epaint_default_fonts) keep each font's licence
+    # next to it in fonts/, as .txt files.
+    fonts = os.path.join(d, "fonts")
+    if os.path.isdir(fonts):
+        for f in sorted(os.listdir(fonts)):
+            if f.lower().endswith(".txt"):
+                with open(os.path.join(fonts, f), encoding="utf-8", errors="replace") as fh:
+                    out.append(("fonts/" + f, fh.read().strip()))
     return out
 
 
