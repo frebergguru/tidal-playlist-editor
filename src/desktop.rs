@@ -42,7 +42,23 @@ fn exec_arg(path: &str) -> String {
         }
     }
     quoted.push('"');
-    quoted.replace('\\', "\\\\")
+    string_value(&quoted)
+}
+
+/// `s` escaped as a Desktop Entry string value: backslashes, and line breaks
+/// and tabs, which would otherwise end the line or start a new key.
+fn string_value(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// The `.desktop` file for a program at `exe`.
@@ -50,7 +66,7 @@ pub fn entry_text(exe: &str) -> String {
     let mut out = String::new();
     for line in TEMPLATE.lines() {
         if line.starts_with("Exec=") {
-            out.push_str(&format!("Exec={}\nTryExec={exe}\n", exec_arg(exe)));
+            out.push_str(&format!("Exec={}\nTryExec={}\n", exec_arg(exe), string_value(exe)));
         } else {
             out.push_str(line);
             out.push('\n');
@@ -118,6 +134,11 @@ mod tests {
         assert!(text.contains("\nTryExec=/home/me/Apps/Editor.AppImage\n"));
         assert!(text.contains("\nIcon=tidal-playlist-editor\n"));
         assert!(text.ends_with(&format!("{MARK}\n")));
+        // A line break in the path cannot start a new key; a backslash survives TryExec.
+        let text = entry_text("/a\nIcon=evil\\b");
+        assert!(text.contains("\nExec=\"/a\\nIcon=evil\\\\\\\\b\"\n"), "{text}");
+        assert!(text.contains("\nTryExec=/a\\nIcon=evil\\\\b\n"), "{text}");
+        assert!(!text.contains("\nIcon=evil"));
     }
 
     #[test]

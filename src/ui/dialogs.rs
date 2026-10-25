@@ -2376,7 +2376,7 @@ pub fn start_import(app: &mut App) {
         return;
     };
     let content = match std::fs::read(&path) {
-        Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+        Ok(b) => files::decode_text(&b),
         Err(e) => return app.error(format!("{}: {e}", tr.could_not_read_file)),
     };
     match files::parse_import(&path, &content) {

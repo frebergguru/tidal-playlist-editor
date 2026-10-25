@@ -115,6 +115,18 @@ for spdx in ["Apache-2.0", "BSL-1.0", "MPL-2.0"]:
     with open(f"/usr/share/licenses/spdx/{spdx}.txt", encoding="utf-8") as fh:
         w(f"\n[{spdx}]\n" + fh.read().strip() + "\n")
 
+w("\n\n" + "=" * 72 + "\n")
+w("Rust standard library and MinGW-w64 runtime\n")
+w("=" * 72 + "\n")
+w("\nThe Rust standard library is built into every binary. It is licensed under\n"
+  "MIT OR Apache-2.0 (texts [MIT] and [Apache-2.0] above); the copyright notices\n"
+  "of it and its dependencies are in the Rust toolchain's\n"
+  "share/doc/rust/COPYRIGHT-library.html and at https://github.com/rust-lang/rust.\n")
+# The Windows build links the MinGW-w64 runtime statically; its licence asks
+# for this file in every binary distribution.
+with open("/usr/share/licenses/mingw-w64-crt/COPYING.MinGW-w64-runtime.txt", encoding="utf-8") as fh:
+    w("\nMinGW-w64 runtime (Windows build)\n\n" + fh.read().strip() + "\n")
+
 if "--appimage" in sys.argv:
     d = os.path.join(sys.argv[sys.argv.index("--appimage") + 1], "licences")
     w("\n\n" + "=" * 72 + "\n")

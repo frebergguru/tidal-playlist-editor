@@ -102,7 +102,7 @@ cargo test emoji_screenshot -- --ignored
   `check-stripped.sh` (ELF: no `.symtab` or `.debug_*`; PE: no `.debug_*` and 0 COFF
   symbols) and checks that the Windows `.exe` needs no MinGW runtime DLLs. Do not
   weaken these checks. `NOTICE` (generated) must list every crate and bundled font with
-  its licence text.
+  its licence text, and the MinGW-w64 runtime notice the Windows `.exe` links in.
 - **AppImage:** the type2 runtime it starts with is third-party and links in libfuse
   (LGPL-2.1). `release.sh` checks the runtime is stripped, puts the runtime's licences
   in the AppImage's `NOTICE` (`gen-notice.py --appimage`), and ships its complete

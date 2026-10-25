@@ -337,6 +337,61 @@ fn parse_duration_text(s: &str, millis: bool) -> Option<u32> {
     Some(if millis { (n / 1000.0).round() as u32 } else { n.round() as u32 })
 }
 
+/// The text of an import file: UTF-8 (with or without a BOM), UTF-16 with a BOM
+/// (Excel's "Unicode text", Apple Music's .txt), or else Windows-1252, which
+/// older players write plain .m3u files in.
+pub fn decode_text(b: &[u8]) -> String {
+    let utf16 = |b: &[u8], from: fn([u8; 2]) -> u16| {
+        let units = b.as_chunks::<2>().0.iter().map(|&c| from(c));
+        char::decode_utf16(units).map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER)).collect()
+    };
+    if let Some(rest) = b.strip_prefix(&[0xFF, 0xFE]) {
+        return utf16(rest, u16::from_le_bytes);
+    }
+    if let Some(rest) = b.strip_prefix(&[0xFE, 0xFF]) {
+        return utf16(rest, u16::from_be_bytes);
+    }
+    match std::str::from_utf8(b) {
+        Ok(s) => s.to_owned(),
+        Err(_) => b.iter().map(|&c| cp1252(c)).collect(),
+    }
+}
+
+fn cp1252(c: u8) -> char {
+    const HIGH: [u16; 32] = [
+        0x20AC, 0x81, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0x8D,
+        0x017D, 0x8F, 0x90, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A,
+        0x0153, 0x9D, 0x017E, 0x0178,
+    ];
+    match c {
+        0x80..=0x9F => char::from_u32(u32::from(HIGH[usize::from(c - 0x80)])).unwrap_or(char::REPLACEMENT_CHARACTER),
+        _ => char::from(c),
+    }
+}
+
+/// "Artist - Title" from a playlist entry's file name: the last part of a Unix
+/// or Windows path or a `file:` URL (percent-decoded), without its extension.
+fn label_from_entry(line: &str) -> String {
+    let name = line.rsplit(['/', '\\']).next().unwrap_or(line);
+    let name = if line.starts_with("file:") {
+        String::from_utf8_lossy(&crate::player::dash::percent_decode(name)).into_owned()
+    } else {
+        name.to_owned()
+    };
+    let stem = Path::new(&name).file_stem().and_then(|s| s.to_str()).unwrap_or(&name).to_owned();
+    stem.replace('_', " ")
+}
+
+/// Like [`split_artist_title`], but a leading track number ("01 - Title",
+/// "01 - Artist - Title") is not taken for the artist.
+fn split_file_label(s: &str) -> (Vec<String>, String) {
+    let (artists, title) = split_artist_title(s);
+    match artists.first() {
+        Some(a) if a.len() <= 3 && a.chars().all(|c| c.is_ascii_digit()) => split_artist_title(&title),
+        _ => (artists, title),
+    }
+}
+
 pub fn parse_import(path: &Path, content: &str) -> Result<Vec<ImportPlaylist>, String> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Imported").to_owned();
@@ -397,12 +452,8 @@ pub fn parse_m3u(content: &str, name: &str) -> ImportPlaylist {
             pending = Some((dur.map(|d| d as u32), label.trim().to_owned()));
         } else if !line.starts_with('#') {
             let (dur, label) = pending.take().unwrap_or((None, String::new()));
-            let label = if label.is_empty() {
-                Path::new(line).file_stem().and_then(|s| s.to_str()).unwrap_or(line).replace('_', " ")
-            } else {
-                label
-            };
-            let (artists, title) = split_artist_title(&label);
+            let (artists, title) =
+                if label.is_empty() { split_file_label(&label_from_entry(line)) } else { split_artist_title(&label) };
             let (kind, id) = match tidal_id_from_url(line) {
                 Some((k, id)) => (k, Some(id)),
                 None => (ItemKind::Track, None),
@@ -648,6 +699,23 @@ mod tests {
         assert_eq!(p.rows[0].title, "Title");
         assert_eq!(p.rows[1].title, "Thing");
         assert_eq!(p.rows[2].id.as_deref(), Some("42"));
+        // Windows paths, file: URLs and track numbers in file names.
+        let m = "C:\\Music\\Abba - Waterloo.mp3\nfile:///home/u/Beyonc%C3%A9%20-%20Halo.flac\n/m/01 - Intro.ogg\n/m/02. x/03 - Queen - Bohemian Rhapsody.flac\n";
+        let p = parse_m3u(m, "x");
+        let got: Vec<(Vec<String>, String)> = p.rows.iter().map(|r| (r.artists.clone(), r.title.clone())).collect();
+        assert_eq!(
+            got,
+            [
+                (vec!["Abba".to_owned()], "Waterloo".to_owned()),
+                (vec!["Beyoncé".to_owned()], "Halo".to_owned()),
+                (vec![], "Intro".to_owned()),
+                (vec!["Queen".to_owned()], "Bohemian Rhapsody".to_owned()),
+            ]
+        );
+        assert_eq!(decode_text(b"Beyonc\xe9 \x96 Halo"), "Beyoncé – Halo");
+        assert_eq!(decode_text("Beyoncé".as_bytes()), "Beyoncé");
+        assert_eq!(decode_text(b"\xff\xfeA\x00\xe9\x00"), "Aé");
+        assert_eq!(decode_text(b"\xfe\xff\x00A\x00\xe9"), "Aé");
         assert_eq!(tidal_id_from_url("https://example.com/track/1"), None);
         assert_eq!(safe_file_name("a/b: c?"), "a_b_ c_");
         assert_eq!(safe_file_name("con"), "_con");

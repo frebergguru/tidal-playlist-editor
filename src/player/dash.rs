@@ -27,7 +27,7 @@ pub fn decode_data_uri(uri: &str) -> Option<Result<String, String>> {
 }
 
 /// RFC 3986 percent-decoding (unlike form decoding, `+` stays a plus).
-fn percent_decode(s: &str) -> Vec<u8> {
+pub(crate) fn percent_decode(s: &str) -> Vec<u8> {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
