@@ -16,6 +16,9 @@ OUT="dist/$VERSION"
 NAME=tidal-playlist-editor
 JOBS=${JOBS:-4}
 
+echo "== assets"
+tools/fetch-assets.sh
+
 echo "== tests"
 cargo test --locked -j "$JOBS"
 cargo clippy --locked -j "$JOBS" --all-targets -- -D warnings

@@ -89,6 +89,7 @@ The app sends nothing anywhere except to TIDAL, with a generic User-Agent.
 ## Building
 
 ```sh
+tools/fetch-assets.sh                      # fonts (not kept in the repo; from the system or upstream)
 rustup toolchain install 1.99.1            # pinned in rust-toolchain.toml
 cargo run --release                        # Linux
 cargo test                                 # unit, API mock and headless UI tests
@@ -105,7 +106,8 @@ Please report problems in writing, as an issue in this project's repository. Rep
 
 ## Licence
 
-MIT, see `LICENSE`. Third-party components and their licences are listed in `NOTICE`.
+MIT, see `LICENSE`. Third-party components and their licences are listed in `NOTICE`, which
+`release.sh` generates and ships with every release (run `python3 -I tools/gen-notice.py` to see it).
 This project is not made by or affiliated with TIDAL.
 
 ---
