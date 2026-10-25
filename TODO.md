@@ -6,9 +6,6 @@ for third-party apps (genres did), so check each one against the live API before
 
 ## Finish what exists
 
-- [ ] **New release.** The packages in `dist/0.1.0/` predate recommendations, the genre
-      generator, colour emoji, Find videos, sound quality, clean versions, radio, songs across
-      playlists and trim. Run `release.sh`.
 - [ ] **Windows test.** Colour emoji (Segoe UI Emoji, COLR) and the system font lookup
       (`egui_system_font_provider`, DirectWrite) compile for Windows but have not been seen running there.
 - [ ] **Screen reader check of the running app** (AT-SPI on Linux). The headless tests
@@ -35,6 +32,7 @@ for third-party apps (genres did), so check each one against the live API before
 
 ## Done
 
+- Release 0.2.0 built (`dist/0.2.0/`, stripped, tests and clippy clean).
 - Upgrade sound quality (same ISRC; Hi-Res, lossless, optionally Dolby Atmos).
   Note: `/tracks?filter[isrc]=` with several ISRCs returns only one track per ISRC, so the
   lookup is one ISRC per request.
