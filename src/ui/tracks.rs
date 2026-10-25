@@ -417,8 +417,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     // The ✓ in the # cell shows selection without relying on colour;
                     // the cursor row is shown by the focus ring.
                     row.set_selected(is_sel);
-                    let title =
+                    let mut title =
                         t.as_ref().map(Track::full_title).unwrap_or_else(|| i18n::fmt(tr.unknown_item, &[&it.r.id]));
+                    // Said in text, so it is not shown by the icon alone.
+                    if it.r.kind == crate::api::ItemKind::Video {
+                        title = format!("🎬 {}: {title}", tr.video);
+                    }
                     let artist = t.as_ref().map(Track::artist_line).unwrap_or_default();
                     let album = t.as_ref().and_then(|t| t.album.clone()).unwrap_or_default();
                     let status = if it.replacement.is_some() {

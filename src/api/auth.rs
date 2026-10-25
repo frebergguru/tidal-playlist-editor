@@ -306,10 +306,13 @@ mod tests {
         assert_eq!(t.join().unwrap().unwrap(), "abc");
 
         // Wrong state is refused (CSRF protection) and the real redirect still works.
-        let (c3, k3) = (cfg.clone(), cancel.clone());
+        // A new port: tiny_http closes the old listener on a background thread,
+        // so a quick reconnect to the same port could still reach the closing one.
+        let c3 = AuthConfig::new("cid", None, "http://localhost:18766/callback");
+        let k3 = cancel.clone();
         let t = std::thread::spawn(move || wait_for_code(&c3, "S2", k3));
-        assert!(hit(18765, "/callback?code=evil&state=evil").starts_with("HTTP/1.1 400"));
-        assert!(hit(18765, "/callback?error=access_denied&state=S2").contains("Login failed"));
+        assert!(hit(18766, "/callback?code=evil&state=evil").starts_with("HTTP/1.1 400"));
+        assert!(hit(18766, "/callback?error=access_denied&state=S2").contains("Login failed"));
         assert!(matches!(t.join().unwrap(), Err(ApiError::Auth(_))));
 
         // Cancel ends the wait without a request.

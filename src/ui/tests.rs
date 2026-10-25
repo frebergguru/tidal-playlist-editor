@@ -564,4 +564,50 @@ fn emoji_screenshot() {
     }
     h.run();
     h.render().unwrap().save(dir.join("emoji.png")).unwrap();
+    let video = {
+        let mut v = item(9, "Live clip", true);
+        v.r.kind = ItemKind::Video;
+        v
+    };
+    h.state_mut().items.get_mut("p1").unwrap().push(video.clone());
+    h.run();
+    h.render().unwrap().save(dir.join("video-row.png")).unwrap();
+    let p = h.state().playlists[0].clone();
+    h.state_mut().open_dialog(super::Dialog::videos_results(vec![(p, video)]));
+    h.run();
+    h.render().unwrap().save(dir.join("videos.png")).unwrap();
+}
+
+#[test]
+fn videos_are_marked_and_listed() {
+    let mut h = harness();
+    logged_in(&mut h);
+    let video = {
+        let mut v = item(9, "Live clip", true);
+        v.r.kind = ItemKind::Video;
+        v.track.as_mut().unwrap().kind = ItemKind::Video;
+        v
+    };
+    {
+        let app = h.state_mut();
+        app.items.get_mut("p1").unwrap().push(video.clone());
+    }
+    h.run();
+    // The row says it is a video in text (read out by screen readers too).
+    assert!(h.query_all_by_label_contains("Video: Live clip").count() >= 1);
+    {
+        let app = h.state_mut();
+        let p = app.playlists[0].clone();
+        app.open_dialog(super::Dialog::videos_results(vec![(p, video)]));
+    }
+    h.run();
+    h.get_by_label("Found 1 video(s) in 1 playlist(s).");
+    h.get_by_label("Open in TIDAL: Live clip — Artist");
+    h.get_by_role_and_label(Role::CheckBox, "Live clip — Artist").click();
+    h.run();
+    h.get_by_label("Remove 1 video(s)").click();
+    h.run();
+    assert!(h.state().dialog.is_none());
+    assert!(!h.state().items["p1"].iter().any(|i| i.item_id == "occ9"), "video removed");
+    assert_eq!(h.state().undo["p1"].len(), 1, "undoable");
 }

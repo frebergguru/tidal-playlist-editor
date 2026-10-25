@@ -68,6 +68,16 @@ impl RecommendDialog {
     }
 }
 
+pub struct VideosDialog {
+    /// Choosing which playlists to look through (before the search).
+    pub setup: bool,
+    pub all: bool,
+    pub current: Option<String>,
+    /// (playlist, video), in playlist order.
+    pub hits: Vec<(Playlist, PlaylistItem)>,
+    pub remove: Vec<bool>,
+}
+
 pub struct GenerateDialog {
     /// The built-in genres, then any the user typed in.
     pub genres: Vec<Genre>,
@@ -154,6 +164,7 @@ pub enum Dialog {
     Unavailable(Box<UnavailableDialog>),
     Recommend(Box<RecommendDialog>),
     Generate(Box<GenerateDialog>),
+    Videos(Box<VideosDialog>),
     Duplicates {
         pid: String,
         mode: DupMode,
@@ -250,6 +261,19 @@ impl Dialog {
     pub fn recommend(pid: String, recs: Vec<Recommendation>, rows: HashSet<String>) -> Self {
         let pick = vec![false; recs.len()];
         Dialog::Recommend(Box::new(RecommendDialog { pid, recs, pick, rows, searching: false }))
+    }
+    pub fn videos_setup(current: Option<String>) -> Self {
+        Dialog::Videos(Box::new(VideosDialog {
+            setup: true,
+            all: current.is_none(),
+            current,
+            hits: Vec::new(),
+            remove: Vec::new(),
+        }))
+    }
+    pub fn videos_results(hits: Vec<(Playlist, PlaylistItem)>) -> Self {
+        let remove = vec![false; hits.len()];
+        Dialog::Videos(Box::new(VideosDialog { setup: false, all: false, current: None, hits, remove }))
     }
     pub fn generate(norwegian: bool) -> Self {
         Dialog::Generate(Box::new(GenerateDialog {
@@ -605,6 +629,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         Dialog::Unavailable(u) => unavailable(app, ctx, u, first),
         Dialog::Recommend(r) => recommend(app, ctx, r, first),
         Dialog::Generate(g) => generate(app, ctx, g, first),
+        Dialog::Videos(v) => videos(app, ctx, v, first),
         Dialog::Duplicates { pid, mode, groups, remove, seen } => {
             // The list changed under the dialog (reload, undo): work the groups
             // out again, keeping the user's choices for rows that still exist.
@@ -965,6 +990,90 @@ fn recommend(app: &mut App, ctx: &egui::Context, r: &mut RecommendDialog, first:
     if ok {
         let refs = r.recs.iter().zip(&r.pick).filter(|(_, p)| **p).map(|(rec, _)| rec.track.item_ref()).collect();
         app.add_to_playlist(&r.pid, refs, true);
+    }
+    if ok || cancel || esc { Outcome::Close } else { Outcome::Keep }
+}
+
+fn videos(app: &mut App, ctx: &egui::Context, v: &mut VideosDialog, first: bool) -> Outcome {
+    let tr = app.tr;
+    if v.setup {
+        let cur_name = v.current.as_ref().and_then(|id| app.playlist(id)).map(|p| p.name.clone());
+        let (esc, (ok, cancel)) = frame(ctx, "videos-setup", tr.find_videos, |ui| {
+            ui.label(tr.videos_explain);
+            if let Some(n) = &cur_name {
+                let r = ui.radio_value(&mut v.all, false, i18n::fmt(tr.only_playlist, &[n]));
+                if first {
+                    r.request_focus();
+                }
+            }
+            ui.radio_value(&mut v.all, true, i18n::fmt(tr.all_my_playlists, &[&app.playlists.len().to_string()]));
+            ok_cancel(ui, tr, tr.find, true)
+        });
+        if ok {
+            let playlists: Vec<Playlist> = if v.all || cur_name.is_none() {
+                app.playlists.clone()
+            } else {
+                app.playlists.iter().filter(|p| Some(&p.id) == v.current.as_ref()).cloned().collect()
+            };
+            let job = app.start_job(tr.finding_videos, JobKind::Scan);
+            app.worker.send(Cmd::FindVideos { playlists, job });
+        }
+        return if ok || cancel || esc { Outcome::Close } else { Outcome::Keep };
+    }
+    let mut open = None;
+    let (esc, (ok, cancel)) = frame(ctx, "videos", tr.videos_in_playlists, |ui| {
+        if v.hits.is_empty() {
+            ui.label(tr.no_videos);
+            let b = ui.button(tr.close);
+            if first {
+                b.request_focus();
+            }
+            return (false, b.clicked());
+        }
+        let lists = v.hits.iter().map(|(p, _)| p.id.as_str()).collect::<HashSet<_>>().len();
+        ui.label(i18n::fmt(tr.found_n_videos, &[&v.hits.len().to_string(), &lists.to_string()]));
+        ui.label(tr.videos_tick_to_remove);
+        egui::ScrollArea::vertical().max_height(ui.available_height() - 80.0).show(ui, |ui| {
+            let mut last = "";
+            for (n, (p, it)) in v.hits.iter().enumerate() {
+                if p.id != last {
+                    ui.add_space(4.0);
+                    let head = if p.owned { p.name.clone() } else { format!("{} ({})", p.name, tr.not_yours) };
+                    ui.strong(head);
+                    last = &p.id;
+                }
+                ui.push_id(n, |ui| {
+                    ui.horizontal(|ui| {
+                        let desc = track_desc(tr, app.track_meta(it).as_ref(), &it.r.id);
+                        let b = ui.button("↗");
+                        b.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{}: {desc}", tr.open_in_tidal))
+                        });
+                        if first && n == 0 {
+                            b.request_focus();
+                        }
+                        if b.on_hover_text(tr.open_in_tidal).clicked() {
+                            open = Some(Track { id: it.r.id.clone(), kind: it.r.kind, ..Default::default() });
+                        }
+                        ui.add_enabled(p.owned, egui::Checkbox::new(&mut v.remove[n], desc));
+                    });
+                });
+            }
+        });
+        let n = v.remove.iter().filter(|r| **r).count();
+        ok_cancel(ui, tr, &i18n::fmt(tr.remove_n_videos, &[&n.to_string()]), n > 0)
+    });
+    if let Some(t) = open {
+        app.open_in_tidal(t.app_url(), t.web_url());
+    }
+    if ok {
+        let mut by_pid: HashMap<String, HashSet<String>> = HashMap::new();
+        for ((p, it), _) in v.hits.iter().zip(&v.remove).filter(|(_, r)| **r) {
+            by_pid.entry(p.id.clone()).or_default().insert(it.item_id.clone());
+        }
+        for (pid, ids) in &by_pid {
+            app.remove_from_playlist(pid, ids);
+        }
     }
     if ok || cancel || esc { Outcome::Close } else { Outcome::Keep }
 }

@@ -316,8 +316,9 @@ impl App {
     fn open_result(&mut self, d: Dialog) {
         let replaceable = matches!(
             self.dialog,
-            None | Some(Dialog::Unavailable(_) | Dialog::Recommend(_) | Dialog::ImportReview { .. })
-                | Some(Dialog::FromSpotify { .. } | Dialog::ToSpotify { .. })
+            None | Some(
+                Dialog::Unavailable(_) | Dialog::Recommend(_) | Dialog::Videos(_) | Dialog::ImportReview { .. }
+            ) | Some(Dialog::FromSpotify { .. } | Dialog::ToSpotify { .. })
         );
         if replaceable {
             self.open_dialog(d);
@@ -638,6 +639,7 @@ impl App {
                     .collect();
                 self.open_result(Dialog::unavailable_results(hits));
             }
+            Event::Videos(hits) => self.open_result(Dialog::videos_results(hits)),
             Event::Recommendations { pid, recs } => match &mut self.dialog {
                 Some(Dialog::Recommend(r)) if r.pid == pid && r.searching => r.append(recs),
                 _ => {
@@ -927,6 +929,9 @@ impl App {
                 {
                     let rows = self.views.get(&p.id).map(|v| v.selected.clone()).unwrap_or_default();
                     self.recommend(&p.id, rows, &[]);
+                }
+                if ui.add_enabled(logged_in, egui::Button::new(tr.find_videos_dots)).clicked() {
+                    self.open_dialog(Dialog::videos_setup(self.current.clone()));
                 }
                 if ui.add_enabled(cur.is_some(), egui::Button::new(tr.find_duplicates_dots)).clicked()
                     && let Some(p) = &cur

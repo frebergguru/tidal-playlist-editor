@@ -162,6 +162,11 @@ pub enum Cmd {
         ids: Vec<String>,
         add: bool,
     },
+    /// Every video in `playlists`, reported as [`Event::Videos`].
+    FindVideos {
+        playlists: Vec<Playlist>,
+        job: Job,
+    },
     /// Similar songs for `pid`, from TIDAL's similar tracks of each seed.
     /// `have`: songs to leave out (already in the playlist or already shown).
     Recommend {
@@ -309,6 +314,8 @@ pub enum Event {
         error: String,
     },
     Unavailable(Vec<UnavailableHit>),
+    /// (playlist, video) pairs, in playlist order.
+    Videos(Vec<(Playlist, PlaylistItem)>),
     Recommendations {
         pid: String,
         recs: Vec<Recommendation>,
@@ -622,6 +629,7 @@ async fn run_job(ctx: &Ctx, cmd: Cmd) {
         | Cmd::ScanUnavailable { job, .. }
         | Cmd::FindReplacements { job, .. }
         | Cmd::Recommend { job, .. }
+        | Cmd::FindVideos { job, .. }
         | Cmd::Generate { job, .. }
         | Cmd::Replace { job, .. }
         | Cmd::Match { job, .. }
@@ -864,6 +872,22 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
                 }
             }
             ctx.emit(Event::Unavailable(hits));
+            Ok(None)
+        }
+        Cmd::FindVideos { playlists, .. } => {
+            let mut found = Vec::new();
+            let total = playlists.len();
+            for (n, p) in playlists.into_iter().enumerate() {
+                if cancel() {
+                    return Err(ApiError::Cancelled);
+                }
+                let items = c.playlist_items(&p.id, &cancel).await?;
+                let videos = items.iter().filter(|i| i.r.kind == crate::api::ItemKind::Video).cloned();
+                found.extend(videos.map(|v| (p.clone(), v)));
+                ctx.emit(Event::Items { pid: p.id.clone(), items });
+                ctx.emit(Event::Progress { job: job.id, done: n + 1, total });
+            }
+            ctx.emit(Event::Videos(found));
             Ok(None)
         }
         Cmd::Recommend { pid, seeds, have, .. } => {
