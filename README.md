@@ -16,7 +16,7 @@ with your own TIDAL account through your own developer app.
   - undo and redo.
 - **Find new songs:** search the TIDAL catalogue for tracks, albums and artists, and add one song, a selection or a whole album to one or more playlists.
 - **Recommendations:** Tools → "Recommend songs…" (or "Similar songs…" on selected rows) asks TIDAL for songs like the ones in the playlist, ranks them, leaves out songs you already have, and lets you preview and add the ones you pick.
-- **Generate playlists:** Tools → "Generate playlists…": choose genres and how many songs, and get one mixed playlist or one per genre, filled with songs from TIDAL that are not already in your playlists.
+- **Generate playlists:** Tools → "Generate playlists…": tick genres from the list or type your own (any genre, mood or style), choose how many songs, and get one mixed playlist or one per genre. The songs come from TIDAL's own playlists for each genre, leaving out songs already in your playlists. (TIDAL's genre data is not available to third-party apps, so the app searches by genre name.)
 - **Unavailable songs:**
   - scan one or all playlists for songs TIDAL no longer offers in your country, with an optional thorough check of streaming rights;
   - remove them, or replace them with the same recording (ISRC) or the best search match.
@@ -31,6 +31,7 @@ with your own TIDAL account through your own developer app.
   - you check every match before anything is written.
 - **Playback:** previews of about 30 seconds inside the app; "Open in TIDAL" for full tracks.
 - **Other:** add songs to My Collection, and statistics per playlist.
+- **Emoji and other scripts:** emoji in playlist and song names are shown in colour with the system's emoji font (Noto Color Emoji, Segoe UI Emoji); characters the built-in fonts lack, such as Japanese or Arabic, come from the system's fonts.
 - **Spotify ⇄ TIDAL:** copy playlists, including Liked Songs, from Spotify to TIDAL, or from TIDAL to Spotify.
   - Songs are matched by ISRC first, then by artist and title.
   - You review every match before anything is written.
@@ -132,7 +133,7 @@ TIDAL-konto via din egen utviklerapp.
   - angre og gjør om.
 - **Finn nye sanger:** søk i TIDAL etter spor, album og artister, og legg til én sang, et utvalg eller et helt album i én eller flere spillelister.
 - **Anbefalinger:** Verktøy → «Anbefal sanger …» (eller «Lignende sanger …» på valgte rader) ber TIDAL om sanger som ligner på dem i spillelisten, rangerer dem, utelater sanger du allerede har, og lar deg høre smakebiter og legge til dem du velger.
-- **Lag spillelister:** Verktøy → «Lag spillelister …»: velg sjangre og hvor mange sanger, og få én blandet spilleliste eller én per sjanger, fylt med sanger fra TIDAL som ikke allerede er i spillelistene dine.
+- **Lag spillelister:** Verktøy → «Lag spillelister …»: kryss av for sjangre i listen eller skriv inn din egen (sjanger, stemning eller stil), velg hvor mange sanger, og få én blandet spilleliste eller én per sjanger. Sangene hentes fra TIDALs egne spillelister for hver sjanger, uten sanger som allerede er i spillelistene dine. (TIDALs sjangerdata er ikke tilgjengelig for tredjepartsapper, så programmet søker på sjangernavnet.)
 - **Utilgjengelige sanger:**
   - søk gjennom én eller alle spillelister etter sanger TIDAL ikke lenger tilbyr i landet ditt, med valgfri grundig sjekk av strømmerettigheter;
   - fjern dem, eller erstatt dem med samme innspilling (ISRC) eller beste søketreff.
@@ -147,6 +148,7 @@ TIDAL-konto via din egen utviklerapp.
   - du sjekker hvert treff før noe skrives.
 - **Avspilling:** smakebiter på omtrent 30 sekunder i programmet; «Åpne i TIDAL» for hele spor.
 - **Annet:** legg sanger i Min samling, og statistikk per spilleliste.
+- **Emoji og andre skriftsystemer:** emoji i navn på spillelister og sanger vises i farger med systemets emoji-skrift (Noto Color Emoji, Segoe UI Emoji); tegn de innebygde skriftene mangler, for eksempel japansk eller arabisk, hentes fra systemets skrifter.
 - **Spotify ⇄ TIDAL:** kopier spillelister, også Likte sanger, fra Spotify til TIDAL eller fra TIDAL til Spotify.
   - Sangene finnes via ISRC først, så artist og tittel.
   - Du sjekker hvert treff før noe lagres.
@@ -182,7 +184,7 @@ og lagres ikke. Prosjektet er ikke laget av eller tilknyttet Spotify.
 ## Hvor dataene lagres
 
 Innstillinger og innlogginger (bare lesbare for deg) ligger i `~/.config/tidal-playlist-editor/` på Linux og i
-`%APPDATA%\freberg\tidal-playlist-editor\config\` på Windows. Sikkerhetskopier ligger i
+`%APPDATA%\freberg\tidal-playlist-editor\config\` på Windows. Sikkerhetskopier og lageret med sangnavn ligger i
 `~/.local/share/tidal-playlist-editor/` på Linux og i `%APPDATA%\freberg\tidal-playlist-editor\data\` på Windows.
 Med miljøvariabelen `TIDAL_EDITOR_HOME` holdes alt i én mappe. Programmet sender ingenting noe sted unntatt til TIDAL,
 og til Spotify bare når du kobler til en Spotify-konto, alltid med en generisk User-Agent.
