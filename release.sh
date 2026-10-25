@@ -40,7 +40,14 @@ for d in "$OUT"/$NAME-*; do
 done
 
 # Windows: the .exe must not need MinGW runtime DLLs that we do not ship.
-if objdump -p "$OUT/$NAME-windows-x86_64/$NAME.exe" | grep -iE "DLL Name: (libgcc|libstdc|libwinpthread)"; then
+# objdump runs on its own first, so a missing or failing objdump stops the
+# release instead of looking like "no bad DLLs".
+IMPORTS=$(objdump -p "$OUT/$NAME-windows-x86_64/$NAME.exe")
+if ! grep -q "DLL Name:" <<<"$IMPORTS"; then
+    echo "FAIL: could not read the Windows import table" >&2
+    exit 1
+fi
+if grep -iE "DLL Name: (libgcc|libstdc|libwinpthread)" <<<"$IMPORTS"; then
     echo "FAIL: Windows build depends on MinGW runtime DLLs" >&2
     exit 1
 fi

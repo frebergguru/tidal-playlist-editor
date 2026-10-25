@@ -23,11 +23,60 @@ pub struct DupGroup {
     pub extra: Vec<usize>,
 }
 
-pub fn find_duplicates(items: &[PlaylistItem], mode: DupMode, cache: &dyn Fn(&str) -> Option<Track>) -> Vec<DupGroup> {
+/// The bracketed parts of a title and a " - suffix", e.g. "Song - Live" or
+/// "Song (Acoustic) [Remix]" → "live" / "acoustic|remix".
+fn bracketed(title: &str) -> String {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0usize;
+    for c in title.chars() {
+        match c {
+            '(' | '[' => {
+                depth += 1;
+                if depth == 1 {
+                    cur.clear();
+                }
+            }
+            ')' | ']' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    parts.push(std::mem::take(&mut cur));
+                }
+            }
+            c if depth > 0 => cur.push(c),
+            _ => {}
+        }
+    }
+    if let Some((_, tail)) = title.split_once(" - ") {
+        parts.push(tail.to_owned());
+    }
+    parts.join("|")
+}
+
+/// A version text reduced to what tells recordings apart: remaster and
+/// "feat." notes are dropped, the rest is lower-case words.
+fn version_key(v: &str) -> String {
+    v.split('|')
+        .map(|p| p.to_lowercase())
+        .filter(|p| {
+            let p = p.trim_start();
+            !p.contains("remaster") && !["feat", "ft.", "ft ", "featuring", "with "].iter().any(|m| p.starts_with(m))
+        })
+        .map(|p| p.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" "))
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+pub fn find_duplicates(
+    items: &[PlaylistItem],
+    mode: DupMode,
+    cache: &dyn Fn(&ItemRef) -> Option<Track>,
+) -> Vec<DupGroup> {
     let mut first_by_key: HashMap<String, usize> = HashMap::new();
     let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
     for (i, it) in items.iter().enumerate() {
-        let meta = it.track.clone().or_else(|| cache(&it.r.id));
+        let meta = it.track.clone().or_else(|| cache(&it.r));
         let mut keys = vec![format!("id:{:?}:{}", it.r.kind, it.r.id)];
         if mode != DupMode::Exact
             && let Some(isrc) = meta.as_ref().and_then(|t| t.isrc.clone())
@@ -39,7 +88,12 @@ pub fn find_duplicates(items: &[PlaylistItem], mode: DupMode, cache: &dyn Fn(&st
         {
             let title = normalise(&t.title);
             if !title.is_empty() {
-                keys.push(format!("ta:{}|{}", normalise(&t.artist_line()), title));
+                // Keep live, acoustic and remix versions apart: the version and
+                // any bracketed part of the title (other than remaster/feat.
+                // noise, which `normalise` drops) belong to the key.
+                let version = t.version.as_deref().map(version_key).unwrap_or_default();
+                let tag = version_key(&bracketed(&t.title));
+                keys.push(format!("ta:{}|{}|{}|{}", normalise(&t.artist_line()), title, version, tag));
             }
         }
         match keys.iter().find_map(|k| first_by_key.get(k).copied()) {
@@ -263,7 +317,7 @@ mod tests {
             item(4, "3", Some("I3"), "Song"),
             item(5, "4", None, "Other"),
         ];
-        let none = |_: &str| None;
+        let none = |_: &ItemRef| None;
         let exact = find_duplicates(&items, DupMode::Exact, &none);
         assert_eq!(exact.len(), 1);
         assert_eq!(exact[0].extra, vec![1]);
@@ -271,6 +325,21 @@ mod tests {
         assert_eq!(isrc[0].extra, vec![1, 2]);
         let loose = find_duplicates(&items, DupMode::Loose, &none);
         assert_eq!(loose[0].extra, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn loose_keeps_different_versions_apart() {
+        let items = vec![
+            item(1, "1", None, "Song"),
+            item(2, "2", None, "Song (Acoustic)"),
+            item(3, "3", None, "Song - Live"),
+            item(4, "4", None, "Song (2011 Remaster)"),
+            item(5, "5", None, "Song (feat. Someone)"),
+            item(6, "6", None, "Song (Acoustic)"),
+        ];
+        let loose = find_duplicates(&items, DupMode::Loose, &|_: &ItemRef| None);
+        let groups: Vec<(usize, Vec<usize>)> = loose.into_iter().map(|g| (g.keep, g.extra)).collect();
+        assert_eq!(groups, vec![(0, vec![3, 4]), (1, vec![5])]);
     }
 
     #[test]

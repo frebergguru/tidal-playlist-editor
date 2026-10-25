@@ -26,6 +26,9 @@ pub struct UnavailableDialog {
     pub geo: bool,
     /// Waiting for the user to confirm «Remove all GEO_RESTRICTED».
     pub confirm_geo: bool,
+    /// Move focus to «Yes» once, when the question appears (not every frame,
+    /// which would trap Tab).
+    pub focus_geo: bool,
     pub current: Option<String>,
     pub hits: Vec<UnavailableHit>,
     pub remove: Vec<bool>,
@@ -64,6 +67,12 @@ pub struct ImportEntry {
 pub struct RestoreEntry {
     pub backup: ExportPlaylist,
     pub target: Option<String>,
+    /// Asking «Replace the contents …?» before the restore is sent.
+    pub confirm: bool,
+    /// Already sent for this target (stops a second click queueing it again).
+    pub sent_to: Option<String>,
+    /// Move focus to «Yes» once, when the question appears.
+    pub focus_confirm: bool,
 }
 
 pub enum Dialog {
@@ -112,7 +121,10 @@ pub enum Dialog {
         pid: String,
         mode: DupMode,
         groups: Vec<DupGroup>,
-        remove: HashSet<usize>,
+        /// Item ids (not positions) to remove, so a reload cannot shift them.
+        remove: HashSet<String>,
+        /// The playlist's item ids when `groups` was worked out.
+        seen: Vec<String>,
     },
     ImportReview {
         dest: Dest,
@@ -172,6 +184,7 @@ impl Dialog {
             strict,
             geo,
             confirm_geo: false,
+            focus_geo: false,
             current,
             hits: Vec::new(),
             remove: Vec::new(),
@@ -188,6 +201,7 @@ impl Dialog {
             strict: false,
             geo: false,
             confirm_geo: false,
+            focus_geo: false,
             current: None,
             remove: vec![true; n],
             hits,
@@ -198,9 +212,9 @@ impl Dialog {
     }
     pub fn duplicates(app: &App, pid: &str) -> Self {
         let mode = DupMode::Exact;
-        let groups = dup_groups(app, pid, mode);
-        let remove = groups.iter().flat_map(|g| g.extra.iter().copied()).collect();
-        Dialog::Duplicates { pid: pid.to_owned(), mode, groups, remove }
+        let (groups, seen) = dup_groups(app, pid, mode);
+        let remove = extra_ids(app, pid, &groups);
+        Dialog::Duplicates { pid: pid.to_owned(), mode, groups, remove, seen }
     }
     pub fn import_review(dest: Dest, playlists: Vec<(ImportPlaylist, Vec<MatchRow>)>) -> Self {
         let entries = playlists
@@ -218,8 +232,16 @@ impl Dialog {
     }
 }
 
-fn dup_groups(app: &App, pid: &str, mode: DupMode) -> Vec<DupGroup> {
-    app.items.get(pid).map(|items| analysis::find_duplicates(items, mode, &|id| app.cache.get(id))).unwrap_or_default()
+/// Duplicate groups plus the item ids they were computed from.
+fn dup_groups(app: &App, pid: &str, mode: DupMode) -> (Vec<DupGroup>, Vec<String>) {
+    let Some(items) = app.items.get(pid) else { return Default::default() };
+    let groups = analysis::find_duplicates(items, mode, &|r| app.cache.get(r));
+    (groups, items.iter().map(|i| i.item_id.clone()).collect())
+}
+
+fn extra_ids(app: &App, pid: &str, groups: &[DupGroup]) -> HashSet<String> {
+    let Some(items) = app.items.get(pid) else { return HashSet::new() };
+    groups.iter().flat_map(|g| g.extra.iter().filter_map(|&e| items.get(e)).map(|i| i.item_id.clone())).collect()
 }
 
 enum Outcome {
@@ -238,7 +260,8 @@ fn frame<R>(ctx: &egui::Context, id: &str, title: &str, add: impl FnOnce(&mut eg
         ui.add_space(4.0);
         add(ui)
     });
-    let esc = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape));
+    // While a combo box or menu is open, Esc closes that popup, not the dialog.
+    let esc = !resp.any_popup_open && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape));
     (esc, resp.inner)
 }
 
@@ -365,8 +388,17 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             let (esc, (ok, cancel)) = frame(ctx, "delete", tr.delete_playlist, |ui| {
                 ui.label(i18n::fmt(tr.confirm_delete, &[name]));
                 ui.label(RichText::new(tr.delete_cannot_undo).strong());
-
-                ok_cancel(ui, tr, tr.delete, true)
+                ui.add_space(8.0);
+                // Focus starts on the safe choice.
+                ui.horizontal(|ui| {
+                    let ok = ui.button(tr.delete).clicked();
+                    let c = ui.button(tr.cancel);
+                    if first {
+                        c.request_focus();
+                    }
+                    (ok, c.clicked())
+                })
+                .inner
             });
             if ok {
                 app.worker.send(Cmd::DeletePlaylist(pid.clone()));
@@ -438,7 +470,10 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 ui.checkbox(skip_dups, tr.skip_already_present);
                 ok_cancel(ui, tr, title, !targets.is_empty() || !new_name.trim().is_empty())
             });
-            if ok {
+            if ok && let (Some(ids), Some(src)) = (move_from.as_ref(), exclude.as_ref()) {
+                let named = Some(new_name.trim().to_owned()).filter(|n| !n.is_empty());
+                app.move_to_playlists(src, ids, targets.iter().cloned().collect(), named, *skip_dups);
+            } else if ok {
                 for pid in targets.iter() {
                     app.add_to_playlist(pid, refs.clone(), *skip_dups);
                 }
@@ -451,9 +486,6 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         add: refs.clone(),
                         job,
                     });
-                }
-                if let (Some(ids), Some(src)) = (move_from.as_ref(), exclude.as_ref()) {
-                    app.remove_from_playlist(src, ids);
                 }
             }
             if ok || cancel || esc { Outcome::Close } else { Outcome::Keep }
@@ -518,7 +550,19 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             if close || esc { Outcome::Close } else { Outcome::Keep }
         }
         Dialog::Unavailable(u) => unavailable(app, ctx, u, first),
-        Dialog::Duplicates { pid, mode, groups, remove } => {
+        Dialog::Duplicates { pid, mode, groups, remove, seen } => {
+            // The list changed under the dialog (reload, undo): work the groups
+            // out again, keeping the user's choices for rows that still exist.
+            if app.items.get(pid.as_str()).is_some_and(|l| !l.iter().map(|i| &i.item_id).eq(seen.iter())) {
+                let was_extra: HashSet<String> =
+                    groups.iter().flat_map(|g| g.extra.iter().filter_map(|&e| seen.get(e).cloned())).collect();
+                (*groups, *seen) = dup_groups(app, pid, *mode);
+                let extras = extra_ids(app, pid, groups);
+                // Keep choices for rows that are still extra copies; rows that
+                // only now count as extra start ticked, as on opening.
+                remove.retain(|id| extras.contains(id));
+                remove.extend(extras.into_iter().filter(|id| !was_extra.contains(id)));
+            }
             let items = app.items.get(pid.as_str()).cloned().unwrap_or_default();
             let mut new_mode = *mode;
             let (esc, (ok, cancel)) = frame(ctx, "dups", tr.find_duplicates, |ui| {
@@ -548,7 +592,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         );
                         for &e in &g.extra {
                             let Some(it) = items.get(e) else { continue };
-                            let mut on = remove.contains(&e);
+                            let mut on = remove.contains(&it.item_id);
                             let text = format!(
                                 "{} {}: {}",
                                 tr.remove,
@@ -557,9 +601,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                             );
                             if ui.checkbox(&mut on, text).changed() {
                                 if on {
-                                    remove.insert(e)
+                                    remove.insert(it.item_id.clone())
                                 } else {
-                                    remove.remove(&e)
+                                    remove.remove(&it.item_id)
                                 };
                             }
                         }
@@ -570,12 +614,11 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             });
             if new_mode != *mode {
                 *mode = new_mode;
-                *groups = dup_groups(app, pid, new_mode);
-                *remove = groups.iter().flat_map(|g| g.extra.iter().copied()).collect();
+                (*groups, *seen) = dup_groups(app, pid, new_mode);
+                *remove = extra_ids(app, pid, groups);
             }
             if ok {
-                let ids: HashSet<String> =
-                    remove.iter().filter_map(|&i| items.get(i)).map(|i| i.item_id.clone()).collect();
+                let ids = remove.clone();
                 app.remove_from_playlist(pid, &ids);
             }
             if ok || cancel || esc { Outcome::Close } else { Outcome::Keep }
@@ -860,13 +903,14 @@ fn unavailable(app: &mut App, ctx: &egui::Context, u: &mut UnavailableDialog, fi
                 find = true;
             }
             if u.searching {
-                ui.spinner();
+                super::style::busy(ui, app.reduced_motion);
                 ui.label(tr.searching);
             }
             if geo_count > 0 && !u.confirm_geo {
                 let b = ui.button(i18n::fmt(tr.remove_all_geo, &[&geo_count.to_string()]));
                 if b.clicked() {
                     u.confirm_geo = true;
+                    u.focus_geo = true;
                 }
             }
         });
@@ -877,7 +921,9 @@ fn unavailable(app: &mut App, ctx: &egui::Context, u: &mut UnavailableDialog, fi
                         .strong(),
                 );
                 let yes = ui.button(tr.yes_remove);
-                yes.request_focus();
+                if std::mem::take(&mut u.focus_geo) {
+                    yes.request_focus();
+                }
                 if yes.clicked() {
                     remove_geo = true;
                     u.confirm_geo = false;
@@ -1180,7 +1226,7 @@ fn spotify_login(app: &mut App, ctx: &egui::Context, first: bool) -> Outcome {
                     ui.ctx().copy_text(u.clone());
                 }
             } else {
-                ui.spinner();
+                super::style::busy(ui, app.reduced_motion);
             }
             let c = ui.button(tr.cancel);
             if first {
@@ -1249,7 +1295,7 @@ fn from_spotify(app: &mut App, ctx: &egui::Context, selected: &mut HashSet<Strin
         ui.label(RichText::new(tr.spotify_attribution).italics());
         if items.is_empty() {
             ui.horizontal(|ui| {
-                ui.spinner();
+                super::style::busy(ui, app.reduced_motion);
                 ui.label(tr.loading);
             });
         }
@@ -1328,7 +1374,7 @@ fn restore(app: &mut App, ctx: &egui::Context, entries: &mut [RestoreEntry], fir
                                     load.push(pid.clone());
                                 }
                                 ui.horizontal(|ui| {
-                                    ui.spinner();
+                                    super::style::busy(ui, app.reduced_motion);
                                     ui.label(tr.loading);
                                 });
                             }
@@ -1364,7 +1410,7 @@ fn restore(app: &mut App, ctx: &egui::Context, entries: &mut [RestoreEntry], fir
                                                     .map(|i| {
                                                         track_desc(
                                                             tr,
-                                                            app.cache.get(&i.r.id).as_ref().or(i.track.as_ref()),
+                                                            app.cache.get(&i.r).as_ref().or(i.track.as_ref()),
                                                             &r.id,
                                                         )
                                                     })
@@ -1373,8 +1419,31 @@ fn restore(app: &mut App, ctx: &egui::Context, entries: &mut [RestoreEntry], fir
                                             }
                                         },
                                     );
-                                    if ui.button(tr.restore_into_this).clicked() {
-                                        restore_into = Some((pid.clone(), target));
+                                    let target_name =
+                                        mine.iter().find(|p| &p.id == pid).map(|p| p.name.clone()).unwrap_or_default();
+                                    if e.sent_to.as_ref() == Some(pid) {
+                                        ui.label(tr.restore_started);
+                                    } else if e.confirm {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(
+                                                RichText::new(i18n::fmt(tr.confirm_restore, &[&target_name])).strong(),
+                                            );
+                                            let yes = ui.button(tr.yes_restore);
+                                            if std::mem::take(&mut e.focus_confirm) {
+                                                yes.request_focus();
+                                            }
+                                            if yes.clicked() {
+                                                e.confirm = false;
+                                                e.sent_to = Some(pid.clone());
+                                                restore_into = Some((pid.clone(), target));
+                                            }
+                                            if ui.button(tr.no).clicked() {
+                                                e.confirm = false;
+                                            }
+                                        });
+                                    } else if ui.button(tr.restore_into_this).clicked() {
+                                        e.confirm = true;
+                                        e.focus_confirm = true;
                                     }
                                 }
                             }
@@ -1465,7 +1534,7 @@ pub fn start_restore(app: &mut App) {
                             .filter(|id| app.playlist(id).is_some())
                             .cloned()
                             .or_else(|| app.playlists.iter().find(|p| p.name == b.name).map(|p| p.id.clone()));
-                    RestoreEntry { backup: b, target }
+                    RestoreEntry { backup: b, target, confirm: false, sent_to: None, focus_confirm: false }
                 })
                 .collect();
             app.open_dialog(Dialog::Restore(entries));
@@ -1484,7 +1553,7 @@ pub fn write_export(
     backup: bool,
 ) -> std::io::Result<usize> {
     std::fs::create_dir_all(dir)?;
-    let cache = |id: &str| app.cache.get(id);
+    let cache = |r: &ItemRef| app.cache.get(r);
     let pls: Vec<ExportPlaylist> = data.iter().map(|(p, items)| ExportPlaylist::new(p, items, &cache)).collect();
     let mut used = HashSet::new();
     let mut n = 0;
@@ -1494,13 +1563,22 @@ pub fn write_export(
             stem = format!("{stem} ({})", p.id.as_deref().unwrap_or("").chars().take(8).collect::<String>());
             used.insert(stem.to_lowercase());
         }
-        let path: PathBuf = dir.join(format!("{stem}.{}", format.ext()));
-        std::fs::write(path, files::render(p, format))?;
+        std::fs::write(free_path(dir, &stem, format.ext()), files::render(p, format))?;
         n += 1;
     }
     if format == ExportFormat::Json && (backup || pls.len() > 1) {
-        std::fs::write(dir.join("all-playlists.json"), files::to_json(&files::export_file(pls)))?;
+        std::fs::write(free_path(dir, "all-playlists", "json"), files::to_json(&files::export_file(pls)))?;
         n += 1;
     }
     Ok(n)
+}
+
+/// `dir/stem.ext`, or `dir/stem (2).ext` and so on when that file exists, so an
+/// export never overwrites a file the user already has.
+fn free_path(dir: &Path, stem: &str, ext: &str) -> PathBuf {
+    let first = dir.join(format!("{stem}.{ext}"));
+    if !first.exists() {
+        return first;
+    }
+    (2..).map(|k| dir.join(format!("{stem} ({k}).{ext}"))).find(|p| !p.exists()).expect("some free name")
 }

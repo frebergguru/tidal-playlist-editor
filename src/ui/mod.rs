@@ -54,6 +54,18 @@ pub struct ViewState {
     pub row_focus: Option<egui::Id>,
 }
 
+impl ViewState {
+    /// Keeps row indices inside a list of `len` rows.
+    pub fn clamp(&mut self, len: usize) {
+        let last = len.checked_sub(1);
+        for i in [&mut self.cursor, &mut self.anchor, &mut self.scroll_to, &mut self.focus_row] {
+            if i.is_some_and(|c| c >= len) {
+                *i = last;
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchTab {
     Tracks,
@@ -92,6 +104,8 @@ pub struct JobInfo {
     pub label: String,
     pub done: usize,
     pub total: usize,
+    /// `done` is a share out of 1000, shown as a percentage.
+    pub permille: bool,
     pub kind: JobKind,
 }
 
@@ -132,9 +146,13 @@ pub struct App {
     pub show_log: bool,
     pub dialog: Option<Dialog>,
     pub dialog_opened: bool,
+    /// Results that arrived while the user was busy in another dialog.
+    pending_dialog: Option<Dialog>,
     pub focus: Option<FocusTarget>,
     pub preview_status: Option<String>,
     pub reduced_motion: bool,
+    /// The system "reduce animations" setting, kept current by a watcher thread.
+    system_motion: Arc<std::sync::atomic::AtomicBool>,
     pub copy_text: Option<String>,
     pub spotify: SpState,
     /// Held in memory only (Spotify Developer Terms: no caching of content).
@@ -153,9 +171,11 @@ impl App {
         let player = PlayerHandle::spawn(cfg.volume, move || r2());
         let worker =
             WorkerHandle::spawn(paths.token_file.clone(), paths.spotify_token_file.clone(), player.clone(), repaint);
+        let system_motion = style::watch_system_motion(ctx.clone());
         let reduced_motion = style::reduced_motion(&cfg);
         style::install_fonts(&ctx);
         style::apply(&ctx, &cfg, reduced_motion);
+        i18n::set_current(i18n::for_language(cfg.language));
         let mut app = Self {
             tr: i18n::for_language(cfg.language),
             cache: TrackCache::load(&paths),
@@ -185,9 +205,11 @@ impl App {
             show_log: false,
             dialog: None,
             dialog_opened: false,
+            pending_dialog: None,
             focus: None,
             preview_status: None,
             reduced_motion,
+            system_motion,
             copy_text: None,
             spotify: SpState::Off,
             sp_playlists: Vec::new(),
@@ -284,6 +306,22 @@ impl App {
         self.dialog_opened = true;
     }
 
+    /// Opens a job's result dialog, unless the user is working in an unrelated
+    /// dialog (typing in Settings, say): then it waits until that one closes.
+    fn open_result(&mut self, d: Dialog) {
+        let replaceable = matches!(
+            self.dialog,
+            None | Some(Dialog::Unavailable(_) | Dialog::ImportReview { .. })
+                | Some(Dialog::FromSpotify { .. } | Dialog::ToSpotify { .. })
+        );
+        if replaceable {
+            self.open_dialog(d);
+        } else {
+            self.pending_dialog = Some(d);
+            self.note(self.tr.results_waiting.to_owned());
+        }
+    }
+
     pub fn playlist(&self, id: &str) -> Option<&Playlist> {
         self.playlists.iter().find(|p| p.id == id)
     }
@@ -308,7 +346,7 @@ impl App {
 
     pub fn start_job(&mut self, label: impl Into<String>, kind: JobKind) -> Job {
         let job = Job::new();
-        self.jobs.push(JobInfo { job: job.clone(), label: label.into(), done: 0, total: 0, kind });
+        self.jobs.push(JobInfo { job: job.clone(), label: label.into(), done: 0, total: 0, permille: false, kind });
         job
     }
 
@@ -337,7 +375,7 @@ impl App {
     }
 
     pub fn track_meta(&self, item: &PlaylistItem) -> Option<Track> {
-        item.track.clone().or_else(|| self.cache.get(&item.r.id))
+        item.track.clone().or_else(|| self.cache.get(&item.r))
     }
 
     pub fn open_in_tidal(&mut self, app_url: String, web_url: String) {
@@ -365,6 +403,44 @@ impl App {
         self.worker.send(Cmd::AddItems { pid: pid.to_owned(), refs, before: None, skip_dups, job });
     }
 
+    /// Moves items: adds them to `targets` (and a new playlist when named), then
+    /// removes them from `from` — the worker removes only after every add worked.
+    pub fn move_to_playlists(
+        &mut self,
+        from: &str,
+        item_ids: &HashSet<String>,
+        targets: Vec<String>,
+        new_name: Option<String>,
+        skip_dups: bool,
+    ) {
+        let Some(items) = self.items.get(from) else { return };
+        let moving: Vec<(ItemRef, String)> =
+            items.iter().filter(|i| item_ids.contains(&i.item_id)).map(|i| (i.r.clone(), i.item_id.clone())).collect();
+        if moving.is_empty() {
+            return;
+        }
+        for pid in &targets {
+            self.snapshot(pid);
+        }
+        self.snapshot(from);
+        self.drop_rows(from, item_ids);
+        let job = self.start_job(i18n::fmt(self.tr.moving_n, &[&moving.len().to_string()]), JobKind::Plain);
+        self.worker.send(Cmd::MoveTo { from: from.to_owned(), items: moving, targets, new_name, skip_dups, job });
+    }
+
+    /// Removes rows from the local list right away and keeps the cursor in range.
+    fn drop_rows(&mut self, pid: &str, item_ids: &HashSet<String>) {
+        let mut len = 0;
+        if let Some(list) = self.items.get_mut(pid) {
+            list.retain(|i| !item_ids.contains(&i.item_id));
+            len = list.len();
+        }
+        if let Some(v) = self.views.get_mut(pid) {
+            v.selected.clear();
+            v.clamp(len);
+        }
+    }
+
     pub fn remove_from_playlist(&mut self, pid: &str, item_ids: &HashSet<String>) {
         let Some(items) = self.items.get(pid) else { return };
         let victims: Vec<(ItemRef, String)> =
@@ -373,12 +449,7 @@ impl App {
             return;
         }
         self.snapshot(pid);
-        if let Some(list) = self.items.get_mut(pid) {
-            list.retain(|i| !item_ids.contains(&i.item_id));
-        }
-        if let Some(v) = self.views.get_mut(pid) {
-            v.selected.clear();
-        }
+        self.drop_rows(pid, item_ids);
         let job = self.start_job(i18n::fmt(self.tr.removing_n, &[&victims.len().to_string()]), JobKind::Plain);
         self.worker.send(Cmd::RemoveItems { pid: pid.to_owned(), items: victims, job });
     }
@@ -438,9 +509,7 @@ impl App {
                 if let Some(v) = self.views.get_mut(&pid) {
                     let ids: HashSet<&String> = items.iter().map(|i| &i.item_id).collect();
                     v.selected.retain(|s| ids.contains(s));
-                    if v.cursor.is_some_and(|c| c >= items.len()) {
-                        v.cursor = items.len().checked_sub(1);
-                    }
+                    v.clamp(items.len());
                 }
                 if let Some(p) = self.playlists.iter_mut().find(|p| p.id == pid) {
                     p.number_of_items = Some(items.len() as u32);
@@ -505,6 +574,14 @@ impl App {
                 if let Some(j) = self.jobs.iter_mut().find(|j| j.job.id == job) {
                     j.done = done;
                     j.total = total;
+                    j.permille = false;
+                }
+            }
+            Event::Permille { job, done } => {
+                if let Some(j) = self.jobs.iter_mut().find(|j| j.job.id == job) {
+                    j.done = done.min(1000);
+                    j.total = 1000;
+                    j.permille = true;
                 }
             }
             Event::JobDone { job, note } => {
@@ -528,12 +605,12 @@ impl App {
                     .into_iter()
                     .map(|mut h| {
                         if h.known.is_none() {
-                            h.known = self.cache.get(&h.item.r.id);
+                            h.known = self.cache.get(&h.item.r);
                         }
                         h
                     })
                     .collect();
-                self.open_dialog(Dialog::unavailable_results(hits));
+                self.open_result(Dialog::unavailable_results(hits));
             }
             Event::Replacements(list) => {
                 if let Some(Dialog::Unavailable(u)) = &mut self.dialog {
@@ -541,7 +618,7 @@ impl App {
                 }
             }
             Event::Matches { dest, playlists } => {
-                self.open_dialog(Dialog::import_review(dest, playlists));
+                self.open_result(Dialog::import_review(dest, playlists));
             }
             Event::SpotifyLoginStarted(url) => self.spotify = SpState::LoggingIn { url },
             Event::SpotifyLoggedIn(user) => {
@@ -701,6 +778,7 @@ impl App {
 
     pub fn restyle(&mut self, ctx: &egui::Context) {
         self.tr = i18n::for_language(self.cfg.language);
+        i18n::set_current(self.tr);
         self.reduced_motion = style::reduced_motion(&self.cfg);
         style::apply(ctx, &self.cfg, self.reduced_motion);
         self.save_cfg();
@@ -880,7 +958,7 @@ impl App {
             match self.auth.clone() {
                 AuthState::Checking => {
                     ui.horizontal(|ui| {
-                        ui.spinner();
+                        style::busy(ui, self.reduced_motion);
                         ui.label(tr.checking_session);
                     });
                 }
@@ -906,7 +984,10 @@ impl App {
                         ui.label(tr.need_client_id);
                     }
                     ui.horizontal_wrapped(|ui| {
-                        let login = ui.add_enabled(self.cfg.has_client(), egui::Button::new(tr.log_in_with_tidal));
+                        // One login at a time: a second click would start a second listener.
+                        let starting = self.jobs.iter().any(|j| j.kind == JobKind::Login);
+                        let login =
+                            ui.add_enabled(self.cfg.has_client() && !starting, egui::Button::new(tr.log_in_with_tidal));
                         if self.dialog.is_none() && self.cfg.has_client() && !ui.ctx().memory(|m| m.focused().is_some())
                         {
                             login.request_focus();
@@ -935,6 +1016,13 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.handle_events(&ctx);
         self.shortcuts(&ctx);
+        if self.cfg.motion == crate::store::MotionChoice::System {
+            let sys = self.system_motion.load(std::sync::atomic::Ordering::Relaxed);
+            if sys != self.reduced_motion {
+                self.reduced_motion = sys;
+                style::apply(&ctx, &self.cfg, sys);
+            }
+        }
 
         egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
         egui::Panel::bottom("status").show(ui, |ui| bottom::show(self, ui));
@@ -958,6 +1046,11 @@ impl eframe::App for App {
             egui::CentralPanel::default_margins().show(ui, |ui| self.welcome(ui));
         }
         dialogs::show(self, &ctx);
+        if self.dialog.is_none()
+            && let Some(d) = self.pending_dialog.take()
+        {
+            self.open_dialog(d);
+        }
         if let Some(t) = self.copy_text.take() {
             ctx.copy_text(t);
             self.note(self.tr.link_copied);

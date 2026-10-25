@@ -126,6 +126,34 @@ pub fn system_reduced_motion() -> bool {
     }
 }
 
+/// Re-reads the system setting every few seconds on a background thread, so a
+/// change made while the app runs is followed. The thread ends with the app.
+pub fn watch_system_motion(ctx: egui::Context) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let flag = std::sync::Arc::new(AtomicBool::new(system_reduced_motion()));
+    let weak = std::sync::Arc::downgrade(&flag);
+    let _ = std::thread::Builder::new().name("motion-watch".into()).spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            let Some(f) = weak.upgrade() else { return };
+            let now = system_reduced_motion();
+            if f.swap(now, Ordering::Relaxed) != now {
+                ctx.request_repaint();
+            }
+        }
+    });
+    flag
+}
+
+/// A busy indicator: the animated spinner, or a still "…" when motion is reduced.
+pub fn busy(ui: &mut egui::Ui, reduced_motion: bool) {
+    if reduced_motion {
+        ui.label("…");
+    } else {
+        ui.spinner();
+    }
+}
+
 pub fn reduced_motion(cfg: &Config) -> bool {
     match cfg.motion {
         MotionChoice::Reduced => true,

@@ -176,7 +176,11 @@ pub async fn match_rows<C: Catalog>(
     for m in out.iter_mut().filter(|_| native) {
         let Some(id) = &m.row.id else { continue };
         let hit = match m.row.kind {
-            ItemKind::Track => found.get(id).cloned(),
+            // An id from another service can name an unrelated TIDAL track, so
+            // when the row has a title it must also look like the same song.
+            ItemKind::Track => {
+                found.get(id).filter(|t| m.row.title.is_empty() || score(&m.row, t) >= MIN_MATCH).cloned()
+            }
             ItemKind::Video => Some(Track {
                 id: id.clone(),
                 kind: ItemKind::Video,
@@ -217,8 +221,15 @@ pub async fn match_rows<C: Catalog>(
                 }
             }
         }
-        if m.matched.is_none() && !m.row.title.is_empty() {
-            let res = client.search(&m.row).await?;
+        if m.matched.is_none() && !m.row.title.is_empty() && !search_text(&m.row).is_empty() {
+            // A query TIDAL refuses (400/404) only means no match for this row.
+            let res = match client.search(&m.row).await {
+                Err(e) if matches!(e.status(), Some(400 | 404)) => {
+                    tracing::info!("search refused for {:?}: {e}", m.row.title);
+                    Vec::new()
+                }
+                other => other?,
+            };
             let (hit, conf, alts) = best(&m.row, res);
             m.alternatives = alts;
             if let Some(t) = hit {

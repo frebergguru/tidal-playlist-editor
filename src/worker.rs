@@ -94,6 +94,16 @@ pub enum Cmd {
         items: Vec<(ItemRef, String)>,
         before: Option<String>,
     },
+    /// Adds items to other playlists (and/or a new one), then removes them
+    /// from `from` only when every add succeeded.
+    MoveTo {
+        from: String,
+        items: Vec<(ItemRef, String)>,
+        targets: Vec<String>,
+        new_name: Option<String>,
+        skip_dups: bool,
+        job: Job,
+    },
     ApplyOrder {
         pid: String,
         current: Vec<PlaylistItem>,
@@ -259,6 +269,11 @@ pub enum Event {
         done: usize,
         total: usize,
     },
+    /// Progress as a share (0–1000) when items and playlists are mixed.
+    Permille {
+        job: JobId,
+        done: usize,
+    },
     JobDone {
         job: JobId,
         note: Option<Note>,
@@ -388,8 +403,17 @@ impl WorkerHandle {
     }
 }
 
+/// Error text in the UI's language. `Cancelled` stays the fixed word
+/// "cancelled", which the UI recognises and shows as a note.
 fn err_text(e: &ApiError) -> String {
-    e.to_string()
+    let tr = crate::i18n::current();
+    match e {
+        ApiError::Cancelled => "cancelled".into(),
+        ApiError::NotLoggedIn => tr.err_not_logged_in.into(),
+        ApiError::Network(n) => format!("{}: {n}", tr.err_network),
+        ApiError::Auth(m) => format!("{}: {m}", tr.err_login),
+        ApiError::Http { .. } | ApiError::Other(_) => e.to_string(),
+    }
 }
 
 async fn handle(ctx: Ctx, cmd: Cmd) {
@@ -560,6 +584,7 @@ async fn run_job(ctx: &Ctx, cmd: Cmd) {
         Cmd::CreatePlaylist { job, .. }
         | Cmd::AddItems { job, .. }
         | Cmd::RemoveItems { job, .. }
+        | Cmd::MoveTo { job, .. }
         | Cmd::ApplyOrder { job, .. }
         | Cmd::Restore { job, .. }
         | Cmd::Duplicate { job, .. }
@@ -607,11 +632,15 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
             let _g = ctx.write_lock.lock().await;
             let p = c.create_playlist(&name, &description, access).await?;
             ctx.emit(Event::PlaylistCreated(p.clone()));
-            if !add.is_empty() {
-                c.add_items(&p.id, &add, None, false, &ctx.progress(job, add.len()), &cancel).await?;
-            }
+            let r = if add.is_empty() {
+                Ok(0)
+            } else {
+                c.add_items(&p.id, &add, None, false, &ctx.progress(job, add.len()), &cancel).await
+            };
+            // Reload even after a failed add, so the UI shows what was written.
             refresh_meta(ctx, &c, &p.id).await;
             reload(ctx, &p.id).await;
+            r?;
             Ok(Some(Note::Created(name)))
         }
         Cmd::AddItems { pid, refs, before, skip_dups, .. } => {
@@ -631,18 +660,79 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
             r?;
             Ok(Some(Note::Removed(items.len())))
         }
+        Cmd::MoveTo { from, items, targets, new_name, skip_dups, .. } => {
+            let _g = ctx.write_lock.lock().await;
+            let refs: Vec<ItemRef> = items.iter().map(|(r, _)| r.clone()).collect();
+            let steps = refs.len() * (targets.len() + usize::from(new_name.is_some()) + 1);
+            let p = ctx.progress(job, steps.max(1));
+            let mut base = 0;
+            let mut r: Result<(), ApiError> = Ok(());
+            for pid in &targets {
+                r = c.add_items(pid, &refs, None, skip_dups, &|n| p(base + n), &cancel).await.map(|_| ());
+                refresh_meta(ctx, &c, pid).await;
+                reload(ctx, pid).await;
+                base += refs.len();
+                if r.is_err() {
+                    break;
+                }
+            }
+            if r.is_ok()
+                && let Some(name) = &new_name
+            {
+                r = match c.create_playlist(name, "", AccessType::Unlisted).await {
+                    Ok(np) => {
+                        ctx.emit(Event::PlaylistCreated(np.clone()));
+                        let a = c.add_items(&np.id, &refs, None, false, &|n| p(base + n), &cancel).await;
+                        refresh_meta(ctx, &c, &np.id).await;
+                        reload(ctx, &np.id).await;
+                        base += refs.len();
+                        a.map(|_| ())
+                    }
+                    Err(e) => Err(e),
+                };
+            }
+            if r.is_ok() {
+                r = c.remove_items(&from, &items, &|n| p(base + n), &cancel).await;
+            }
+            // The source is reloaded in every case: the UI removed the rows early.
+            refresh_meta(ctx, &c, &from).await;
+            reload(ctx, &from).await;
+            r?;
+            Ok(Some(Note::Removed(items.len())))
+        }
         Cmd::ApplyOrder { pid, current, order, .. } => {
             let _g = ctx.write_lock.lock().await;
-            let r = c.apply_order(&pid, &current, &order, &ctx.progress(job, order.len()), &cancel).await;
+            // The UI's copy may be out of date (an earlier write failed or was
+            // cancelled), so order against what the server holds now.
+            let r = match c.playlist_items(&pid, &cancel).await {
+                Ok(now) => {
+                    let mut a: Vec<&str> = now.iter().map(|i| i.item_id.as_str()).collect();
+                    let mut b: Vec<&str> = order.iter().map(|i| i.item_id.as_str()).collect();
+                    a.sort_unstable();
+                    b.sort_unstable();
+                    if a == b {
+                        c.apply_order(&pid, &now, &order, &ctx.progress(job, order.len()), &cancel).await
+                    } else {
+                        tracing::info!(
+                            "order for {pid} skipped: playlist changed ({} of {current:?} items)",
+                            now.len(),
+                            current = current.len()
+                        );
+                        Err(ApiError::Other(crate::i18n::current().err_playlist_changed.into()))
+                    }
+                }
+                Err(e) => Err(e),
+            };
             reload(ctx, &pid).await;
             r?;
             Ok(Some(Note::Reordered))
         }
         Cmd::Restore { pid, target, .. } => {
             let _g = ctx.write_lock.lock().await;
-            restore(ctx, &c, &pid, &target, job).await?;
+            let r = restore(ctx, &c, &pid, &target, job).await;
             refresh_meta(ctx, &c, &pid).await;
             reload(ctx, &pid).await;
+            r?;
             Ok(Some(Note::Restored))
         }
         Cmd::Duplicate { source, name, .. } => {
@@ -652,9 +742,10 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
             let p = c.create_playlist(&name, &source.description, source.access_type).await?;
             ctx.emit(Event::PlaylistCreated(p.clone()));
             let refs: Vec<ItemRef> = items.iter().map(|i| i.r.clone()).collect();
-            c.add_items(&p.id, &refs, None, false, &ctx.progress(job, refs.len()), &cancel).await?;
+            let r = c.add_items(&p.id, &refs, None, false, &ctx.progress(job, refs.len()), &cancel).await;
             refresh_meta(ctx, &c, &p.id).await;
             reload(ctx, &p.id).await;
+            r?;
             Ok(Some(Note::Duplicated(name)))
         }
         Cmd::Merge { sources, name, dedupe, .. } => {
@@ -672,9 +763,10 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
             let desc = sources.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(" + ");
             let p = c.create_playlist(&name, &desc, AccessType::Unlisted).await?;
             ctx.emit(Event::PlaylistCreated(p.clone()));
-            c.add_items(&p.id, &refs, None, false, &ctx.progress(job, refs.len()), &cancel).await?;
+            let r = c.add_items(&p.id, &refs, None, false, &ctx.progress(job, refs.len()), &cancel).await;
             refresh_meta(ctx, &c, &p.id).await;
             reload(ctx, &p.id).await;
+            r?;
             Ok(Some(Note::Merged { name, n: refs.len() }))
         }
         Cmd::ScanUnavailable { playlists, strict, geo, .. } => {
@@ -704,7 +796,12 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
                         })
                         .map(|i| i.r.id.clone())
                         .collect();
-                    geo_blocked = geo_check(ctx, &c, ids, job).await?;
+                    // Per-track progress inside this playlist's share of the bar.
+                    let geo_progress = |d: usize, t: usize| {
+                        let done = (n * 1000 + d * 1000 / t.max(1)) / total.max(1);
+                        ctx.emit(Event::Permille { job: job.id, done });
+                    };
+                    geo_blocked = geo_check(&c, ids, job, &geo_progress).await?;
                 }
                 for it in items {
                     let reason = if it.track.is_none() {
@@ -728,7 +825,11 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
                         });
                     }
                 }
-                ctx.emit(Event::Progress { job: job.id, done: n + 1, total });
+                if geo {
+                    ctx.emit(Event::Permille { job: job.id, done: (n + 1) * 1000 / total.max(1) });
+                } else {
+                    ctx.emit(Event::Progress { job: job.id, done: n + 1, total });
+                }
             }
             ctx.emit(Event::Unavailable(hits));
             Ok(None)
@@ -753,23 +854,41 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
         Cmd::Replace { pid, swaps, .. } => {
             let _g = ctx.write_lock.lock().await;
             let total = swaps.len();
+            // Only originals whose replacement was really added get removed, so
+            // a cancel or an error never loses a song without a substitute.
+            let mut added = 0;
+            let mut failed = None;
             for (n, (old, new)) in swaps.iter().enumerate() {
                 if cancel() {
                     break;
                 }
-                c.add_items(&pid, &[new.item_ref()], Some(&old.item_id), false, &|_| {}, &cancel).await?;
+                if let Err(e) = c.add_items(&pid, &[new.item_ref()], Some(&old.item_id), false, &|_| {}, &cancel).await
+                {
+                    failed = Some(e);
+                    break;
+                }
+                added += 1;
                 ctx.emit(Event::Progress { job: job.id, done: n + 1, total: total * 2 });
             }
-            let old: Vec<(ItemRef, String)> = swaps.iter().map(|(o, _)| (o.r.clone(), o.item_id.clone())).collect();
-            c.remove_items(
-                &pid,
-                &old,
-                &|d| ctx.emit(Event::Progress { job: job.id, done: total + d, total: total * 2 }),
-                &|| false,
-            )
-            .await?;
+            let old: Vec<(ItemRef, String)> =
+                swaps[..added].iter().map(|(o, _)| (o.r.clone(), o.item_id.clone())).collect();
+            let removed = c
+                .remove_items(
+                    &pid,
+                    &old,
+                    &|d| ctx.emit(Event::Progress { job: job.id, done: total + d, total: total * 2 }),
+                    &|| false,
+                )
+                .await;
             refresh_meta(ctx, &c, &pid).await;
             reload(ctx, &pid).await;
+            removed?;
+            if let Some(e) = failed {
+                return Err(e);
+            }
+            if added < total {
+                return Err(ApiError::Cancelled);
+            }
             Ok(Some(Note::Replaced(total)))
         }
         Cmd::Match { playlists, .. } => {
@@ -869,10 +988,10 @@ const APP_LEVEL_CODES: [&str; 4] = ["CLIENT_NOT_ENTITLED", "PREREQUISITE_MISSING
 /// Playback check: asks TIDAL for each track's playback manifest (4 at a time)
 /// and returns the ids refused with `GEO_RESTRICTED`.
 async fn geo_check(
-    ctx: &Ctx,
     c: &Arc<Client>,
     ids: Vec<String>,
     job: &Job,
+    progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<std::collections::HashSet<String>, ApiError> {
     let total = ids.len();
     let mut blocked = std::collections::HashSet::new();
@@ -899,12 +1018,12 @@ async fn geo_check(
             _ => {}
         }
         done += 1;
-        ctx.emit(Event::Progress { job: job.id, done, total });
-        if done >= 5 && app_level == done {
+        progress(done, total);
+        // Small playlists are judged once every track has answered.
+        if (done >= 5 || done == total) && app_level == done {
             set.abort_all();
-            return Err(ApiError::Other(format!(
-                "TIDAL does not let this app check playback ({last_app_code}). Run the scan without the playback check."
-            )));
+            let tr = crate::i18n::current();
+            return Err(ApiError::Other(crate::i18n::fmt(tr.err_playback_check_refused, &[&last_app_code])));
         }
     }
     if job.cancelled() {
@@ -1085,7 +1204,7 @@ async fn preview(ctx: &Ctx, track: Track) {
         };
         let reps =
             dash::parse_mpd(&xml, if m.uri.starts_with("data:") { "" } else { &m.uri }).map_err(ApiError::Other)?;
-        let rep = dash::pick(&reps).ok_or_else(|| ApiError::Other("no playable stream in manifest".into()))?;
+        let rep = dash::pick(&reps).ok_or_else(|| ApiError::Other(crate::i18n::current().err_no_stream.into()))?;
         let mut bytes = Vec::new();
         for u in &rep.urls {
             bytes.extend(c.download(u).await?);

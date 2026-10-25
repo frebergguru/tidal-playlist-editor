@@ -73,9 +73,15 @@ def pe_problems(b):
     for i in range(nsec):
         raw = b[sec + i * 40: sec + i * 40 + 8].rstrip(b'\0')
         name = raw.decode('latin-1')
-        if name.startswith('/') and name[1:].isdigit() and strtab:
+        if name.startswith('/') and name[1:].isdigit():
+            # A long section name lives in the COFF string table. If it cannot
+            # be resolved, we cannot tell it is not debug info: fail closed.
             o = int(name[1:])
-            name = strtab[o:strtab.index(b'\0', o)].decode('latin-1')
+            end = strtab.find(b'\0', o) if strtab else -1
+            if end < 0:
+                bad.append('unresolvable section name %s' % name)
+                continue
+            name = strtab[o:end].decode('latin-1')
         if name.startswith(('.debug', '.zdebug')):
             bad.append(name)
     return bad

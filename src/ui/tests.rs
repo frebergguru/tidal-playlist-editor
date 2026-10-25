@@ -388,3 +388,55 @@ fn review_copy_to_spotify() {
     // The worker had no Spotify connection: that is a Spotify login error → disconnected.
     assert!(matches!(h.state().spotify, super::SpState::Off));
 }
+
+#[test]
+fn deleting_the_last_row_keeps_the_cursor_in_range() {
+    let mut h = harness();
+    logged_in(&mut h);
+    h.get_by_label_contains("Row 3, Unknown item").focus();
+    h.run();
+    assert_eq!(h.state().views["p1"].cursor, Some(2));
+    h.key_press(Key::Delete);
+    h.run();
+    assert_eq!(h.state().items["p1"].len(), 2);
+    assert!(h.state().views["p1"].cursor.is_some_and(|c| c < 2), "cursor clamped");
+    // Play and Open act on the clamped cursor instead of panicking.
+    h.key_press_modifiers(Modifiers::COMMAND, Key::P);
+    h.run();
+    h.get_by_role_and_label(Role::Button, "Play preview").click();
+    h.run();
+}
+
+#[test]
+fn move_to_removes_from_the_source_only_through_one_job() {
+    let mut h = harness();
+    logged_in(&mut h);
+    let ids: std::collections::HashSet<String> = ["occ1".to_owned()].into();
+    h.state_mut().move_to_playlists("p1", &ids, vec!["p2".into()], None, false);
+    h.run();
+    let left: Vec<String> = h.state().items["p1"].iter().map(|i| i.item_id.clone()).collect();
+    assert_eq!(left, vec!["occ2", "occ3"], "rows leave the list at once");
+    // A single Move job (no separate add and remove jobs racing each other).
+    let labels: Vec<String> = h.state().jobs.iter().map(|j| j.label.clone()).collect();
+    assert!(labels.iter().all(|l| !l.starts_with("Adding") && !l.starts_with("Removing")), "{labels:?}");
+    assert!(h.state().undo.get("p1").is_some_and(|u| !u.is_empty()), "source is undoable");
+}
+
+#[test]
+fn duplicates_dialog_follows_rows_not_positions() {
+    let mut h = harness();
+    logged_in(&mut h);
+    let mut dup = item(1, "First song", true);
+    dup.item_id = "occ1b".into();
+    h.state_mut().items.get_mut("p1").unwrap().push(dup);
+    let d = super::Dialog::duplicates(h.state(), "p1");
+    h.state_mut().open_dialog(d);
+    h.run();
+    // A reload puts the rows in another order while the dialog is open.
+    h.state_mut().items.get_mut("p1").unwrap().reverse();
+    h.run();
+    let Some(super::Dialog::Duplicates { remove, .. }) = &h.state().dialog else { panic!("dialog closed") };
+    assert_eq!(remove.len(), 1);
+    // After the reverse, "occ1b" comes first and is the one kept; "occ1" is removed.
+    assert!(remove.contains("occ1"), "{remove:?}");
+}

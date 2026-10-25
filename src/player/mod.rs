@@ -125,6 +125,7 @@ fn run(rx: mpsc::Receiver<PlayerCmd>, state: Arc<Mutex<PlayerState>>, mut volume
                 s.playing = false;
                 s.paused = false;
                 s.pos_secs = 0.0;
+                s.error = None;
                 drop(s);
                 repaint();
             }

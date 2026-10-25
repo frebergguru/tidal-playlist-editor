@@ -166,11 +166,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if ui.add_enabled(any, egui::Button::new(tr.remove)).on_hover_text(tr.key_delete).clicked() {
             actions.push(RowAction::Remove(target_ids.clone()));
         }
-        if ui.add_enabled(any, egui::Button::new(tr.move_up)).on_hover_text("Alt+↑").clicked() {
-            actions.push(RowAction::MoveSelection { up: true });
-        }
-        if ui.add_enabled(any, egui::Button::new(tr.move_down)).on_hover_text("Alt+↓").clicked() {
-            actions.push(RowAction::MoveSelection { up: false });
+        // Moving follows the playlist order, so it is off while a filter or sort is shown.
+        let can_move = any && app.views.get(&pid).is_some_and(|v| v.find.trim().is_empty() && v.sort.is_none());
+        for (up, label, key) in [(true, tr.move_up, "Alt+↑"), (false, tr.move_down, "Alt+↓")] {
+            if ui.add_enabled(can_move, egui::Button::new(label)).on_hover_text(key).clicked() {
+                if !has_sel {
+                    app.views.get_mut(&pid).expect("view").selected = target_ids.clone();
+                }
+                actions.push(RowAction::MoveSelection { up });
+            }
         }
         let can_undo = app.undo.get(&pid).is_some_and(|u| !u.is_empty());
         let can_redo = app.redo.get(&pid).is_some_and(|u| !u.is_empty());
@@ -219,7 +223,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     if app.loading.contains(&pid) && !app.items.contains_key(&pid) {
         ui.horizontal(|ui| {
-            ui.spinner();
+            super::style::busy(ui, app.reduced_motion);
             ui.label(tr.loading);
         });
         return;
@@ -236,7 +240,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
 
     let cache = &app.cache;
-    let meta = |i: &PlaylistItem| i.track.clone().or_else(|| cache.get(&i.r.id));
+    let meta = |i: &PlaylistItem| i.track.clone().or_else(|| cache.get(&i.r));
     let view = app.views.get_mut(&pid).expect("view");
     let vis = visible(items, view, &meta);
     let can_reorder = view.find.trim().is_empty() && view.sort.is_none();
@@ -245,6 +249,26 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     if vis.is_empty() {
         ui.label(tr.no_matches);
+    }
+    // The current row in full, wrapped: titles cut short in the table can be
+    // read here without a mouse tooltip.
+    if let Some(it) = view.cursor.and_then(|c| items.get(c)) {
+        let t = meta(it);
+        let mut text = format!(
+            "{} {}: {}",
+            tr.row,
+            view.cursor.unwrap_or(0) + 1,
+            t.as_ref().map(Track::full_title).unwrap_or_else(|| i18n::fmt(tr.unknown_item, &[&it.r.id]))
+        );
+        if let Some(t) = &t {
+            for part in [t.artist_line(), t.album.clone().unwrap_or_default()] {
+                if !part.is_empty() {
+                    text.push_str(" — ");
+                    text.push_str(&part);
+                }
+            }
+        }
+        ui.add(egui::Label::new(RichText::new(text).weak()).wrap());
     }
 
     // Keyboard handling for the focused row.
@@ -292,7 +316,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if end {
             go(vis.len() - 1, &mut actions);
         }
-        if alt_up || alt_down {
+        if (alt_up || alt_down) && can_reorder {
             if view.selected.is_empty() {
                 view.selected.insert(items[idx].item_id.clone());
             }
@@ -328,9 +352,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     egui::ScrollArea::horizontal().id_salt(("tracks-h", &pid)).auto_shrink([false, false]).show(ui, |ui| {
         let show_added = avail >= em * 52.0;
         let show_album = avail >= em * 40.0;
+        // The # cell holds "✓ 1234": a check mark plus the widest row number.
+        let num_w = 1.6 + 0.62 * items.len().max(1).to_string().len() as f32;
         let ncols = 6.0 + f32::from(u8::from(show_album)) + f32::from(u8::from(show_added));
         // Column widths plus the gaps between columns and room for the scroll bar.
-        let fixed = em * (1.2 + 2.4 + 3.2 + 8.0 + if show_added { 6.0 } else { 0.0 } + 1.5)
+        let fixed = em * (1.2 + num_w + 3.2 + 8.0 + if show_added { 6.0 } else { 0.0 } + 1.5)
             + ncols * ui.spacing().item_spacing.x;
         let text_w = (avail - fixed).max(em * 12.0);
         let (wt, wa, wl) = if show_album { (0.45, 0.30, 0.25) } else { (0.6, 0.4, 0.0) };
@@ -342,7 +368,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             .animate_scrolling(!app.reduced_motion)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::exact(em * 1.2))
-            .column(Column::exact(em * 2.4))
+            .column(Column::exact(em * num_w))
             .column(Column::initial(text_w * wt).at_least(em * 4.0).clip(true))
             .column(Column::initial(text_w * wa).at_least(em * 3.0).clip(true));
         if show_album {
@@ -384,7 +410,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     let it = &items[idx];
                     let t = meta(it);
                     let is_sel = selected.contains(&it.item_id);
-                    row.set_selected(is_sel || cursor == Some(idx));
+                    // The ✓ in the # cell shows selection without relying on colour;
+                    // the cursor row is shown by the focus ring.
+                    row.set_selected(is_sel);
                     let title =
                         t.as_ref().map(Track::full_title).unwrap_or_else(|| i18n::fmt(tr.unknown_item, &[&it.r.id]));
                     let artist = t.as_ref().map(Track::artist_line).unwrap_or_default();
@@ -407,7 +435,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         }
                     });
                     row.col(|ui| {
-                        let r = ui.add(egui::Button::selectable(is_sel, format!("{}", idx + 1)));
+                        let num = if is_sel { format!("✓ {}", idx + 1) } else { format!("{}", idx + 1) };
+                        let r = ui.add(egui::Button::selectable(is_sel, num));
                         let a11y = format!(
                             "{} {}, {}{}{}, {}, {}",
                             tr.row,
@@ -510,7 +539,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             actions.push(RowAction::MoveTo(ids.clone()));
                         }
                         if ui.button(tr.add_to_favourites).clicked() {
-                            actions.push(RowAction::Favourite(refs.iter().map(|r| r.id.clone()).collect()));
+                            actions.push(RowAction::Favourite(
+                                refs.iter()
+                                    .filter(|r| r.kind == crate::api::ItemKind::Track)
+                                    .map(|r| r.id.clone())
+                                    .collect(),
+                            ));
                         }
                         if ui.button(tr.remove).clicked() {
                             actions.push(RowAction::Remove(ids));
@@ -536,6 +570,20 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 fn run_action(app: &mut App, pid: &str, a: RowAction, vis: &[usize]) {
     let tr = app.tr;
     let Some(items) = app.items.get(pid).cloned() else { return };
+    // An earlier action this frame (or a reload) may have shortened the list.
+    let idx = match &a {
+        RowAction::Click { idx, .. }
+        | RowAction::Cursor(idx)
+        | RowAction::Focus(idx)
+        | RowAction::Play(idx)
+        | RowAction::Open(idx)
+        | RowAction::CopyLink(idx) => Some(*idx),
+        RowAction::DropBefore { before, .. } => Some(*before),
+        _ => None,
+    };
+    if idx.is_some_and(|i| i >= items.len()) {
+        return;
+    }
     let view = app.views.entry(pid.to_owned()).or_default();
     match a {
         RowAction::Click { idx, toggle, range } => {

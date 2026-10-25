@@ -55,7 +55,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     };
     if app.search.busy {
         ui.horizontal(|ui| {
-            ui.spinner();
+            super::style::busy(ui, app.reduced_motion);
             ui.label(tr.searching);
         });
     }

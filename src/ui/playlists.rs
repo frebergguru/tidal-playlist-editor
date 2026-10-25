@@ -30,7 +30,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.separator();
     if !app.playlists_loaded {
         ui.horizontal(|ui| {
-            ui.spinner();
+            super::style::busy(ui, app.reduced_motion);
             ui.label(tr.loading);
         });
         return;

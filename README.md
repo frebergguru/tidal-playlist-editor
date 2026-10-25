@@ -68,11 +68,12 @@ This project is not made by or affiliated with Spotify.
 
 | | Linux | Windows |
 |---|---|---|
-| Settings (`config.toml`) and login (`tokens.json`, readable only by you) | `~/.config/tidal-playlist-editor/` | `%APPDATA%\freberg\tidal-playlist-editor\config\` |
+| Settings (`config.toml`) and logins (`tokens.json`, Spotify tokens), all readable only by you | `~/.config/tidal-playlist-editor/` | `%APPDATA%\freberg\tidal-playlist-editor\config\` |
 | Backups and song-name cache | `~/.local/share/tidal-playlist-editor/` | `%APPDATA%\freberg\tidal-playlist-editor\data\` |
 
 Set `TIDAL_EDITOR_HOME` to keep everything in one folder instead (portable use).
-The app sends nothing anywhere except to TIDAL, with a generic User-Agent.
+The app sends nothing anywhere except to TIDAL, and to Spotify only when you connect a Spotify
+account, always with a generic User-Agent.
 
 ## Accessibility
 
@@ -174,10 +175,11 @@ og lagres ikke. Prosjektet er ikke laget av eller tilknyttet Spotify.
 
 ## Hvor dataene lagres
 
-Innstillinger og innlogging (bare lesbar for deg) ligger i `~/.config/tidal-playlist-editor/` på Linux og i
+Innstillinger og innlogginger (bare lesbare for deg) ligger i `~/.config/tidal-playlist-editor/` på Linux og i
 `%APPDATA%\freberg\tidal-playlist-editor\config\` på Windows. Sikkerhetskopier ligger i
 `~/.local/share/tidal-playlist-editor/` på Linux og i `%APPDATA%\freberg\tidal-playlist-editor\data\` på Windows.
-Med miljøvariabelen `TIDAL_EDITOR_HOME` holdes alt i én mappe. Programmet sender ingenting noe sted unntatt til TIDAL.
+Med miljøvariabelen `TIDAL_EDITOR_HOME` holdes alt i én mappe. Programmet sender ingenting noe sted unntatt til TIDAL,
+og til Spotify bare når du kobler til en Spotify-konto, alltid med en generisk User-Agent.
 
 ## Tilgjengelighet
 

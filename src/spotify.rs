@@ -152,8 +152,11 @@ impl SpotifyClient {
         }
     }
 
-    async fn access_token(&self, force: bool) -> Result<String> {
+    /// `rejected` is a token that just got a 401; it is refreshed unless
+    /// another request has already replaced it.
+    async fn access_token(&self, rejected: Option<&str>) -> Result<String> {
         let mut t = self.tokens.lock().await;
+        let force = rejected.is_some_and(|r| r == t.access_token);
         if force || t.expires_soon() {
             let Some(rt) = t.refresh_token.clone() else { return Err(login_error("no refresh token")) };
             // A failed refresh (e.g. revoked/expired refresh token) means logging in again.
@@ -172,19 +175,30 @@ impl SpotifyClient {
     }
 
     /// One request with exponential backoff on 429/5xx (honouring Retry-After)
-    /// and a single token refresh on 401.
+    /// and a single token refresh on 401. Spotify has no idempotency keys, so a
+    /// write is retried only when it surely was not applied (connect error, 429).
     async fn send(&self, method: Method, url: &str, query: &[(&str, String)], body: Option<&Value>) -> Result<Value> {
-        let url = if url.starts_with("http") { url.to_owned() } else { format!("{}{url}", self.base) };
+        let url = if url.starts_with("http") {
+            // `next` links must stay on the API host so the token goes nowhere else.
+            if !crate::api::client::same_origin(url, &self.base) {
+                let shown = crate::api::client::strip_query(url);
+                return Err(ApiError::Other(format!("Spotify: refusing link to another host: {shown}")));
+            }
+            url.to_owned()
+        } else {
+            format!("{}{url}", self.base)
+        };
+        let idempotent = method == Method::GET;
         let mut refreshed = false;
         for attempt in 1..=MAX_ATTEMPTS {
-            let token = self.access_token(false).await?;
-            let mut req = self.http.request(method.clone(), &url).bearer_auth(token).query(query);
+            let token = self.access_token(None).await?;
+            let mut req = self.http.request(method.clone(), &url).bearer_auth(&token).query(query);
             if let Some(b) = body {
                 req = req.json(b);
             }
             let resp = match req.send().await {
                 Ok(r) => r,
-                Err(e) if attempt < MAX_ATTEMPTS && (e.is_timeout() || e.is_connect()) => {
+                Err(e) if attempt < MAX_ATTEMPTS && (e.is_connect() || (idempotent && e.is_timeout())) => {
                     tokio::time::sleep(backoff(attempt)).await;
                     continue;
                 }
@@ -193,16 +207,13 @@ impl SpotifyClient {
             let status = resp.status();
             if status == StatusCode::UNAUTHORIZED && !refreshed {
                 refreshed = true;
-                self.access_token(true).await?;
+                self.access_token(Some(&token)).await?;
                 continue;
             }
-            if (status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()) && attempt < MAX_ATTEMPTS {
-                let wait = resp
-                    .headers()
-                    .get("Retry-After")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.trim().parse::<u64>().ok())
-                    .map(|s| Duration::from_secs(s.clamp(1, 300)))
+            let retryable = status == StatusCode::TOO_MANY_REQUESTS || (idempotent && status.is_server_error());
+            if retryable && attempt < MAX_ATTEMPTS {
+                let wait = crate::api::client::retry_after(resp.headers(), 300)
+                    .map(|d| d.max(Duration::from_secs(1)))
                     .unwrap_or_else(|| backoff(attempt));
                 tracing::debug!("Spotify {status}, waiting {wait:?}");
                 tokio::time::sleep(wait).await;
@@ -501,5 +512,36 @@ mod tests {
         let e = c.me().await.unwrap_err();
         assert_eq!(e.status(), Some(403));
         assert!(e.to_string().contains("Insufficient client scope"));
+    }
+
+    #[tokio::test]
+    async fn writes_are_not_retried_after_a_server_error() {
+        // A 502 after a POST may mean it was applied; retrying would duplicate.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/me/playlists"))
+            .respond_with(ResponseTemplate::new(502))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let e = client(&server).create_playlist("Mix", "", false).await.unwrap_err();
+        assert_eq!(e.status(), Some(502));
+    }
+
+    #[tokio::test]
+    async fn next_links_to_other_hosts_are_refused() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/me/playlists"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    json!({"items": [], "next": "https://evil.example/v1/me/playlists?offset=50&token=x"}),
+                ),
+            )
+            .mount(&server)
+            .await;
+        let e = client(&server).playlists().await.unwrap_err();
+        assert!(e.to_string().contains("another host"), "{e}");
+        assert!(!e.to_string().contains("token=x"), "query is not shown");
     }
 }

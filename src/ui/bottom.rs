@@ -23,7 +23,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             app.player.send(PlayerCmd::Stop);
         }
         if let Some(s) = &app.preview_status {
-            ui.spinner();
+            super::style::busy(ui, app.reduced_motion);
             ui.label(s);
         } else if ps.playing || !ps.title.is_empty() {
             let pos = format_duration(ps.pos_secs as u32);
@@ -63,7 +63,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     for j in &app.jobs {
         ui.horizontal(|ui| {
             let frac = if j.total > 0 { j.done as f32 / j.total as f32 } else { 0.0 };
-            let text = if j.total > 0 {
+            let text = if j.permille {
+                format!("{} — {} %", j.label, j.done / 10)
+            } else if j.total > 0 {
                 format!("{} — {}/{}", j.label, j.done, j.total)
             } else {
                 format!("{} …", j.label)
@@ -73,7 +75,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 bar = bar.animate(true);
             }
             ui.add(bar).widget_info(|| egui::WidgetInfo::labeled(egui::Role::ProgressIndicator, true, &text));
-            if ui.button(tr.cancel).clicked() {
+            let cancel_name = format!("{}: {}", tr.cancel, j.label);
+            let b = ui.button(tr.cancel);
+            b.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &cancel_name));
+            if b.clicked() {
                 cancel = Some(j.job.id);
             }
         });

@@ -79,18 +79,27 @@ impl Client {
         }
     }
 
-    fn url_for(&self, path: &str) -> String {
-        if path.starts_with("http://") || path.starts_with("https://") {
+    /// Absolute URLs (from `links.next`) must point at our own API origin, so
+    /// the bearer token never goes to another host or over plain HTTP.
+    fn url_for(&self, path: &str) -> Result<String> {
+        Ok(if path.starts_with("http://") || path.starts_with("https://") {
+            if !same_origin(path, &self.base) {
+                return Err(ApiError::Other(format!("refusing link to another host: {}", strip_query(path))));
+            }
             path.to_owned()
         } else if let Some(rest) = path.strip_prefix("/v2/") {
             format!("{}/{rest}", self.base)
         } else {
             format!("{}/{}", self.base, path.trim_start_matches('/'))
-        }
+        })
     }
 
-    async fn access_token(&self, force_refresh: bool) -> Result<String> {
+    /// The current token, refreshed when it is about to expire. `rejected` is a
+    /// token that just got a 401: it is refreshed unless another request has
+    /// already replaced it.
+    async fn access_token(&self, rejected: Option<&str>) -> Result<String> {
         let mut t = self.tokens.lock().await;
+        let force_refresh = rejected.is_some_and(|r| r == t.access_token);
         if force_refresh || t.expires_soon() {
             let Some(rt) = t.refresh_token.clone() else {
                 return if force_refresh { Err(ApiError::NotLoggedIn) } else { Ok(t.access_token.clone()) };
@@ -109,15 +118,15 @@ impl Client {
     /// Sends one request with retries on 429/5xx and a single re-auth on 401.
     /// Mutations carry an `Idempotency-Key` that stays the same across retries.
     pub async fn send(&self, method: Method, path: &str, query: &Query, body: Option<&Value>) -> Result<Value> {
-        let url = self.url_for(path);
+        let url = self.url_for(path)?;
         let idem = (method != Method::GET).then(|| uuid::Uuid::new_v4().to_string());
         let mut refreshed = false;
         let mut attempt = 0;
         loop {
             attempt += 1;
-            let token = self.access_token(false).await?;
+            let token = self.access_token(None).await?;
             let mut req =
-                self.http.request(method.clone(), &url).bearer_auth(token).header("Accept", JSONAPI).query(query);
+                self.http.request(method.clone(), &url).bearer_auth(&token).header("Accept", JSONAPI).query(query);
             if let Some(k) = &idem {
                 req = req.header("Idempotency-Key", k);
             }
@@ -135,17 +144,11 @@ impl Client {
             let status = resp.status();
             if status == StatusCode::UNAUTHORIZED && !refreshed {
                 refreshed = true;
-                self.access_token(true).await?;
+                self.access_token(Some(&token)).await?;
                 continue;
             }
             if (status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()) && attempt < MAX_ATTEMPTS {
-                let wait = resp
-                    .headers()
-                    .get("Retry-After")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.trim().parse::<u64>().ok())
-                    .map(|s| Duration::from_secs(s.min(120)))
-                    .unwrap_or_else(|| backoff(attempt));
+                let wait = retry_after(resp.headers(), 120).unwrap_or_else(|| backoff(attempt));
                 tracing::debug!("{status} on {url}, retrying in {wait:?}");
                 tokio::time::sleep(wait).await;
                 continue;
@@ -179,8 +182,10 @@ impl Client {
             if cancel() {
                 return Err(ApiError::Cancelled);
             }
+            // A repeated cursor would loop forever; partial data is not safe
+            // either (a sync would think the rest is missing), so fail.
             if !seen.insert(n.clone()) {
-                break;
+                return Err(ApiError::Other(format!("paging repeated itself on {path}")));
             }
             let mut page = self.get(&n, &missing_params(&n, query)).await?;
             all.extend(std::mem::take(&mut page.data).as_array().cloned().unwrap_or_default());
@@ -626,7 +631,11 @@ impl Client {
         let resp = self.http.get(url).send().await?;
         let status = resp.status();
         if !status.is_success() {
-            return Err(ApiError::Http { status: status.as_u16(), detail: format!("download {url}"), code: None });
+            return Err(ApiError::Http {
+                status: status.as_u16(),
+                detail: format!("download {}", strip_query(url)),
+                code: None,
+            });
         }
         Ok(resp.bytes().await?.to_vec())
     }
@@ -648,6 +657,32 @@ fn missing_params(next: &str, ours: &Query) -> Query {
     let qs = next.split_once('?').map(|(_, q)| q).unwrap_or("");
     let present: HashSet<String> = url::form_urlencoded::parse(qs.as_bytes()).map(|(k, _)| k.into_owned()).collect();
     ours.iter().filter(|(k, _)| !present.contains(k)).cloned().collect()
+}
+
+/// `Retry-After` in seconds or as an HTTP date, capped at `max_secs`.
+pub fn retry_after(headers: &reqwest::header::HeaderMap, max_secs: u64) -> Option<Duration> {
+    let v = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?.trim();
+    let secs = match v.parse::<u64>() {
+        Ok(s) => s,
+        Err(_) => {
+            let at = chrono::DateTime::parse_from_rfc2822(v).ok()?;
+            (at.timestamp() - chrono::Utc::now().timestamp()).max(0) as u64
+        }
+    };
+    Some(Duration::from_secs(secs.min(max_secs)))
+}
+
+/// Same scheme, host and port.
+pub fn same_origin(a: &str, b: &str) -> bool {
+    match (url::Url::parse(a), url::Url::parse(b)) {
+        (Ok(a), Ok(b)) => a.origin() == b.origin(),
+        _ => false,
+    }
+}
+
+/// A URL without its query string (signed CDN links carry tokens there).
+pub fn strip_query(url: &str) -> &str {
+    url.split(['?', '#']).next().unwrap_or(url)
 }
 
 fn backoff(attempt: u32) -> Duration {
@@ -731,6 +766,35 @@ mod tests {
         assert_eq!(items.iter().map(|i| i.r.id.as_str()).collect::<Vec<_>>(), vec!["1", "2", "3"]);
         assert!(items.iter().all(|i| i.track.is_some()), "included tracks resolved on every page");
         assert_eq!(items[2].item_id, "occ-3");
+    }
+
+    #[tokio::test]
+    async fn repeated_cursor_fails_instead_of_returning_part() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v2/playlists/p/relationships/items"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(page(&["1"], Some("/v2/playlists/p/relationships/items?page[cursor]=same"))),
+            )
+            .mount(&server)
+            .await;
+        assert!(client(&server, far()).playlist_items("p", &|| false).await.is_err());
+    }
+
+    #[test]
+    fn retry_after_and_origins() {
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert("Retry-After", "7".parse().unwrap());
+        assert_eq!(retry_after(&h, 120), Some(Duration::from_secs(7)));
+        let later = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc2822().replace("+0000", "GMT");
+        h.insert("Retry-After", later.parse().unwrap());
+        let d = retry_after(&h, 120).unwrap();
+        assert!(d >= Duration::from_secs(28) && d <= Duration::from_secs(30), "{d:?}");
+        assert!(same_origin("https://openapi.tidal.com/v2/x?y", API_BASE));
+        assert!(!same_origin("http://openapi.tidal.com/v2/x", API_BASE));
+        assert!(!same_origin("https://openapi.tidal.com.evil.example/v2", API_BASE));
+        assert_eq!(strip_query("https://cdn/x.mp4?token=1"), "https://cdn/x.mp4");
     }
 
     #[tokio::test]

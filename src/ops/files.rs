@@ -110,13 +110,13 @@ impl ExportItem {
 }
 
 impl ExportPlaylist {
-    pub fn new(p: &Playlist, items: &[PlaylistItem], cache: &dyn Fn(&str) -> Option<Track>) -> Self {
+    pub fn new(p: &Playlist, items: &[PlaylistItem], cache: &dyn Fn(&ItemRef) -> Option<Track>) -> Self {
         ExportPlaylist {
             id: Some(p.id.clone()),
             name: p.name.clone(),
             description: p.description.clone(),
             access_type: p.access_type,
-            items: items.iter().map(|i| ExportItem::from_item(i, cache(&i.r.id).as_ref())).collect(),
+            items: items.iter().map(|i| ExportItem::from_item(i, cache(&i.r).as_ref())).collect(),
         }
     }
 
@@ -221,10 +221,20 @@ pub fn render(p: &ExportPlaylist, fmt: ExportFormat) -> String {
 }
 
 /// A file-name-safe version of a playlist name.
+/// Also valid on Windows: no reserved device names, no trailing dot or space.
 pub fn safe_file_name(name: &str) -> String {
     let s: String = name.chars().map(|c| if c.is_alphanumeric() || " -_.()".contains(c) { c } else { '_' }).collect();
-    let s = s.trim().trim_matches('.').to_owned();
-    if s.is_empty() { "playlist".into() } else { s.chars().take(100).collect() }
+    let s: String = s.trim().trim_matches('.').chars().take(100).collect();
+    let s = s.trim_end_matches([' ', '.']).to_owned();
+    if s.is_empty() {
+        return "playlist".into();
+    }
+    let stem = s.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.len() == 4
+            && stem.as_bytes()[3].is_ascii_digit());
+    if reserved { format!("_{s}") } else { s }
 }
 
 // ------------------------------------------------------------------ import
@@ -272,21 +282,30 @@ pub struct ImportPlaylist {
 }
 
 /// Pulls a TIDAL track/video id out of a URL like `https://tidal.com/browse/track/123`.
+/// Also takes app links (`tidal://track/123`). Local file paths never match.
 pub fn tidal_id_from_url(s: &str) -> Option<(ItemKind, String)> {
-    let s = s.trim();
-    if !s.contains("tidal") {
-        return None;
-    }
-    for (seg, kind) in [("track/", ItemKind::Track), ("video/", ItemKind::Video)] {
-        if let Some(pos) = s.find(seg) {
-            let id: String =
-                s[pos + seg.len()..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
-            if !id.is_empty() {
-                return Some((kind, id));
+    let u = url::Url::parse(s.trim()).ok()?;
+    let mut segs: Vec<&str> = u.path_segments().map(|p| p.filter(|x| !x.is_empty()).collect()).unwrap_or_default();
+    match u.scheme() {
+        "https" | "http" => {
+            let host = u.host_str()?.to_ascii_lowercase();
+            if host != "tidal.com" && !host.ends_with(".tidal.com") {
+                return None;
             }
         }
+        // `tidal://track/123`: the kind is parsed as the host.
+        "tidal" => segs.insert(0, u.host_str()?),
+        _ => return None,
     }
-    None
+    segs.windows(2).find_map(|w| {
+        let kind = match w[0] {
+            "track" => ItemKind::Track,
+            "video" => ItemKind::Video,
+            _ => return None,
+        };
+        let id = w[1];
+        (!id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')).then(|| (kind, id.to_owned()))
+    })
 }
 
 fn split_artist_title(s: &str) -> (Vec<String>, String) {
@@ -310,7 +329,7 @@ fn parse_duration_text(s: &str, millis: bool) -> Option<u32> {
     if s.contains(':') {
         let mut secs = 0u32;
         for part in s.split(':') {
-            secs = secs * 60 + part.trim().parse::<f32>().ok()? as u32;
+            secs = secs.checked_mul(60)?.checked_add(part.trim().parse::<f32>().ok()? as u32)?;
         }
         return Some(secs);
     }
@@ -427,6 +446,7 @@ pub fn parse_xspf(content: &str, name: &str) -> Result<ImportPlaylist, String> {
                 buf.clear();
             }
             XmlEvent::Text(t) => buf.push_str(&t.xml10_content()),
+            XmlEvent::CData(t) => buf.push_str(&t.into_inner()),
             XmlEvent::GeneralRef(r) => buf.push_str(&ref_text(&r)),
             XmlEvent::End(_) => {
                 let text = buf.trim().to_owned();
@@ -630,5 +650,20 @@ mod tests {
         assert_eq!(p.rows[2].id.as_deref(), Some("42"));
         assert_eq!(tidal_id_from_url("https://example.com/track/1"), None);
         assert_eq!(safe_file_name("a/b: c?"), "a_b_ c_");
+        assert_eq!(safe_file_name("con"), "_con");
+        assert_eq!(safe_file_name("COM1.list"), "_COM1.list");
+        assert_eq!(safe_file_name("Console"), "Console");
+        assert_eq!(tidal_id_from_url("tidal://video/77"), Some((ItemKind::Video, "77".into())));
+        assert_eq!(tidal_id_from_url("https://tidal.com/browse/track/5"), Some((ItemKind::Track, "5".into())));
+        assert_eq!(tidal_id_from_url("/home/u/tidal-dl/music video/clip.mp4"), None);
+        assert_eq!(tidal_id_from_url("https://nottidal.com/track/5"), None);
+        assert_eq!(parse_duration_text("999999999:99", false), None);
+    }
+
+    #[test]
+    fn xspf_cdata_titles() {
+        let x = "<playlist><trackList><track><title><![CDATA[A & B]]></title><creator>X</creator></track></trackList></playlist>";
+        let p = parse_xspf(x, "x").unwrap();
+        assert_eq!(p.rows[0].title, "A & B");
     }
 }

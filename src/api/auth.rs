@@ -118,6 +118,18 @@ const DONE_PAGE: &str = "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\
 <p>You can close this tab and return to TIDAL Playlist Editor.</p>\
 <p lang=\"nb\">Du kan lukke denne fanen og gå tilbake til TIDAL Spillelisteredigering.</p></body></html>";
 
+const FAILED_PAGE: &str = "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>TIDAL Playlist Editor</title>\
+<body style=\"font-family:sans-serif;font-size:1.25rem;background:#111;color:#eee;padding:2rem\">\
+<h1>Login failed / Innloggingen mislyktes</h1>\
+<p>Return to TIDAL Playlist Editor to see why and try again.</p>\
+<p lang=\"nb\">Gå tilbake til TIDAL Spillelisteredigering for å se hvorfor, og prøv igjen.</p></body></html>";
+
+const STALE_PAGE: &str = "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>TIDAL Playlist Editor</title>\
+<body style=\"font-family:sans-serif;font-size:1.25rem;background:#111;color:#eee;padding:2rem\">\
+<h1>Old login link / Gammel innloggingslenke</h1>\
+<p>This page belongs to an earlier login. Use the newest login tab.</p>\
+<p lang=\"nb\">Denne siden hører til en tidligere innlogging. Bruk den nyeste innloggingsfanen.</p></body></html>";
+
 /// Waits for the browser to hit the redirect URI and returns the authorization code.
 /// Blocking; runs until a code arrives or `cancel` is set (no time limit).
 pub fn wait_for_code(cfg: &AuthConfig, state: &str, cancel: Arc<AtomicBool>) -> Result<String, ApiError> {
@@ -146,15 +158,24 @@ pub fn wait_for_code(cfg: &AuthConfig, state: &str, cancel: Arc<AtomicBool>) -> 
         };
         let q: std::collections::HashMap<String, String> = parsed.query_pairs().into_owned().collect();
         let html = tiny_http::Header::from_bytes("Content-Type", "text/html; charset=utf-8").expect("static header");
-        let _ = req.respond(tiny_http::Response::from_string(DONE_PAGE).with_header(html));
+        // A redirect without our state did not come from this login (stale tab,
+        // another app or a forged request): refuse it and keep waiting.
+        if q.get("state").map(String::as_str) != Some(state) {
+            tracing::warn!("ignoring login redirect with the wrong state");
+            let _ = req.respond(tiny_http::Response::from_string(STALE_PAGE).with_header(html).with_status_code(400));
+            continue;
+        }
         if let Some(err) = q.get("error") {
+            let _ = req.respond(tiny_http::Response::from_string(FAILED_PAGE).with_header(html));
             let desc = q.get("error_description").cloned().unwrap_or_default();
             return Err(ApiError::Auth(format!("{err} {desc}").trim().to_owned()));
         }
-        if q.get("state").map(String::as_str) != Some(state) {
-            return Err(ApiError::Auth("state mismatch in login redirect".into()));
-        }
-        return q.get("code").cloned().ok_or_else(|| ApiError::Auth("no code in login redirect".into()));
+        let Some(code) = q.get("code").cloned() else {
+            let _ = req.respond(tiny_http::Response::from_string(FAILED_PAGE).with_header(html));
+            return Err(ApiError::Auth("no code in login redirect".into()));
+        };
+        let _ = req.respond(tiny_http::Response::from_string(DONE_PAGE).with_header(html));
+        return Ok(code);
     }
 }
 
@@ -222,23 +243,7 @@ pub fn load_tokens(path: &Path) -> Option<TokenSet> {
 
 /// Stores tokens readable only by the current user.
 pub fn save_tokens(path: &Path, t: &TokenSet) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let data = serde_json::to_vec_pretty(t).expect("serialisable");
-    let tmp = path.with_extension("tmp");
-    {
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        use std::io::Write;
-        opts.open(&tmp)?.write_all(&data)?;
-    }
-    std::fs::rename(tmp, path)
+    crate::store::write_private(path, &serde_json::to_vec_pretty(t).expect("serialisable"))
 }
 
 #[cfg(test)]
@@ -300,10 +305,11 @@ mod tests {
         assert!(page.contains("Login complete"));
         assert_eq!(t.join().unwrap().unwrap(), "abc");
 
-        // Wrong state is refused (CSRF protection).
+        // Wrong state is refused (CSRF protection) and the real redirect still works.
         let (c3, k3) = (cfg.clone(), cancel.clone());
         let t = std::thread::spawn(move || wait_for_code(&c3, "S2", k3));
-        hit(18765, "/callback?code=abc&state=evil");
+        assert!(hit(18765, "/callback?code=evil&state=evil").starts_with("HTTP/1.1 400"));
+        assert!(hit(18765, "/callback?error=access_denied&state=S2").contains("Login failed"));
         assert!(matches!(t.join().unwrap(), Err(ApiError::Auth(_))));
 
         // Cancel ends the wait without a request.

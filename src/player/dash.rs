@@ -22,20 +22,41 @@ pub fn decode_data_uri(uri: &str) -> Option<Result<String, String>> {
             .map_err(|e| e.to_string())
             .and_then(|b| String::from_utf8(b).map_err(|e| e.to_string()))
     } else {
-        Ok(url::form_urlencoded::parse(format!("x={payload}").as_bytes())
-            .next()
-            .map(|(_, v)| v.into_owned())
-            .unwrap_or_default())
+        String::from_utf8(percent_decode(payload)).map_err(|e| e.to_string())
     })
 }
+
+/// RFC 3986 percent-decoding (unlike form decoding, `+` stays a plus).
+fn percent_decode(s: &str) -> Vec<u8> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        if b[i] == b'%'
+            && let (Some(h), Some(l)) = (b.get(i + 1).and_then(|&c| hex(c)), b.get(i + 2).and_then(|&c| hex(c)))
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Upper bound on segments per representation, against hostile manifests.
+const MAX_SEGMENTS: usize = 10_000;
 
 #[derive(Default, Clone)]
 struct Template {
     init: Option<String>,
     media: Option<String>,
-    start: u64,
-    timescale: u64,
-    duration: u64,
+    // `None` = not set here, so a Representation inherits the AdaptationSet's.
+    start: Option<u64>,
+    timescale: Option<u64>,
+    duration: Option<u64>,
     timeline: Vec<(Option<u64>, u64, i64)>,
 }
 
@@ -128,7 +149,11 @@ pub fn parse_mpd(xml: &str, manifest_url: &str) -> Result<Vec<Representation>, S
                         urls: Vec::new(),
                     });
                     rep_tpl = None;
-                    if !empty {
+                    if empty {
+                        // `<Representation .../>` has no End event; finish it now.
+                        let base = base_now(&base_stack);
+                        finish_rep(&mut rep, &mut rep_tpl, &set_tpl, &base, manifest_url, total_secs, &mut reps);
+                    } else {
                         base_stack.push(("Representation".into(), base_now(&base_stack)));
                     }
                 }
@@ -141,9 +166,15 @@ pub fn parse_mpd(xml: &str, manifest_url: &str) -> Result<Vec<Representation>, S
                     if let Some(v) = attr(&e, "media") {
                         parent.media = Some(v);
                     }
-                    parent.start = attr(&e, "startNumber").and_then(|v| v.parse().ok()).unwrap_or(1);
-                    parent.timescale = attr(&e, "timescale").and_then(|v| v.parse().ok()).unwrap_or(1);
-                    parent.duration = attr(&e, "duration").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    if let Some(v) = attr(&e, "startNumber").and_then(|v| v.parse().ok()) {
+                        parent.start = Some(v);
+                    }
+                    if let Some(v) = attr(&e, "timescale").and_then(|v| v.parse().ok()) {
+                        parent.timescale = Some(v);
+                    }
+                    if let Some(v) = attr(&e, "duration").and_then(|v| v.parse().ok()) {
+                        parent.duration = Some(v);
+                    }
                     in_timeline_of_rep = rep.is_some();
                 }
                 "S" => {
@@ -181,14 +212,7 @@ pub fn parse_mpd(xml: &str, manifest_url: &str) -> Result<Vec<Representation>, S
                     "Representation" => {
                         let base = base_now(&base_stack);
                         base_stack.pop();
-                        if let Some(mut r) = rep.take() {
-                            let tpl = rep_tpl.take().unwrap_or_else(|| set_tpl.clone());
-                            r.urls = segment_urls(&tpl, &r, &base, total_secs);
-                            if r.urls.is_empty() && !base.is_empty() && base != manifest_url {
-                                r.urls.push(base);
-                            }
-                            reps.push(r);
-                        }
+                        finish_rep(&mut rep, &mut rep_tpl, &set_tpl, &base, manifest_url, total_secs, &mut reps);
                     }
                     "AdaptationSet" => {
                         base_stack.pop();
@@ -204,31 +228,64 @@ pub fn parse_mpd(xml: &str, manifest_url: &str) -> Result<Vec<Representation>, S
     Ok(reps)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn finish_rep(
+    rep: &mut Option<Representation>,
+    rep_tpl: &mut Option<Template>,
+    set_tpl: &Template,
+    base: &str,
+    manifest_url: &str,
+    total_secs: f64,
+    reps: &mut Vec<Representation>,
+) {
+    if let Some(mut r) = rep.take() {
+        let tpl = rep_tpl.take().unwrap_or_else(|| set_tpl.clone());
+        r.urls = segment_urls(&tpl, &r, base, total_secs);
+        if r.urls.is_empty() && !base.is_empty() && base != manifest_url {
+            r.urls.push(base.to_owned());
+        }
+        reps.push(r);
+    }
+}
+
 fn segment_urls(t: &Template, r: &Representation, base: &str, total_secs: f64) -> Vec<String> {
     let Some(media) = &t.media else { return Vec::new() };
+    let timescale = t.timescale.unwrap_or(1).max(1);
     let mut urls = Vec::new();
     if let Some(init) = &t.init {
         urls.push(join(base, &fill(init, &r.id, r.bandwidth, 0, 0)));
     }
-    let mut number = t.start;
+    let mut number = t.start.unwrap_or(1);
     if !t.timeline.is_empty() {
+        let end_time = (total_secs * timescale as f64) as u64;
         let mut time = 0u64;
-        for &(start, d, rep) in &t.timeline {
+        for (i, &(start, d, rep)) in t.timeline.iter().enumerate() {
             if let Some(s) = start {
                 time = s;
             }
-            let count = if rep < 0 { 1 } else { rep as u64 + 1 };
+            let count = if rep >= 0 {
+                rep as u64 + 1
+            } else {
+                // r = -1: repeat until the next S@t, or the end of the period.
+                let until = t.timeline.get(i + 1).and_then(|n| n.0).unwrap_or(end_time);
+                if d == 0 { 1 } else { until.saturating_sub(time).div_ceil(d).max(1) }
+            };
             for _ in 0..count {
+                if urls.len() >= MAX_SEGMENTS {
+                    return urls;
+                }
                 urls.push(join(base, &fill(media, &r.id, r.bandwidth, number, time)));
                 number += 1;
-                time += d;
+                time = time.saturating_add(d);
             }
         }
-    } else if t.duration > 0 && total_secs > 0.0 {
-        let seg_secs = t.duration as f64 / t.timescale.max(1) as f64;
-        let count = (total_secs / seg_secs).ceil() as u64;
+    } else if let Some(duration) = t.duration.filter(|&d| d > 0)
+        && total_secs > 0.0
+    {
+        let seg_secs = duration as f64 / timescale as f64;
+        let count = ((total_secs / seg_secs).ceil() as u64).min(MAX_SEGMENTS as u64);
         for i in 0..count {
-            urls.push(join(base, &fill(media, &r.id, r.bandwidth, number, i * t.duration)));
+            urls.push(join(base, &fill(media, &r.id, r.bandwidth, number, i * duration)));
             number += 1;
         }
     }
@@ -300,5 +357,32 @@ mod tests {
         assert_eq!(decode_data_uri("data:text/plain,a%20b").unwrap().unwrap(), "a b");
         assert!(decode_data_uri("https://x").is_none());
         assert_eq!(fill("$$x$Number%05d$", "r", 1, 42, 0), "$x00042");
+    }
+
+    #[test]
+    fn representation_inherits_set_template_and_may_self_close() {
+        let mpd = r#"<MPD mediaPresentationDuration="PT20S"><Period><AdaptationSet codecs="mp4a.40.2">
+          <SegmentTemplate timescale="1000" duration="10000" startNumber="0" media="s$Number$.mp4"/>
+          <Representation id="a"><SegmentTemplate media="a$Number$.mp4"/></Representation>
+          <Representation id="b" bandwidth="1"/>
+        </AdaptationSet></Period></MPD>"#;
+        let reps = parse_mpd(mpd, "https://m.example/x.mpd").unwrap();
+        assert_eq!(reps.len(), 2);
+        assert_eq!(reps[0].urls, ["https://m.example/a0.mp4", "https://m.example/a1.mp4"]);
+        assert_eq!(reps[1].urls, ["https://m.example/s0.mp4", "https://m.example/s1.mp4"]);
+    }
+
+    #[test]
+    fn open_ended_repeat_fills_the_period() {
+        let mpd = r#"<MPD mediaPresentationDuration="PT10S"><Period><AdaptationSet><Representation id="a">
+          <SegmentTemplate timescale="1" media="$Time$"><SegmentTimeline><S t="0" d="4" r="-1"/></SegmentTimeline></SegmentTemplate>
+        </Representation></AdaptationSet></Period></MPD>"#;
+        let reps = parse_mpd(mpd, "https://m.example/x.mpd").unwrap();
+        assert_eq!(reps[0].urls, ["https://m.example/0", "https://m.example/4", "https://m.example/8"]);
+    }
+
+    #[test]
+    fn percent_encoded_data_uri_keeps_plus() {
+        assert_eq!(decode_data_uri("data:text/plain,a+b%2Bc%").unwrap().unwrap(), "a+b+c%");
     }
 }
