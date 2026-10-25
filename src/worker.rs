@@ -1530,9 +1530,9 @@ async fn load_playlists(ctx: &Ctx) {
 /// TIDAL playlists searched per genre for songs.
 const GENRE_SOURCES: usize = 8;
 
-/// Up to `want` playable songs for a genre that are not in `have`: tracks
-/// found by searching TIDAL for the genre (`g.id`), mostly from its own
-/// editorial playlists such as «Jazz Classics».
+/// Up to `want` playable songs for a genre that are not in `have`, from the
+/// playlists (mostly TIDAL's own, such as «Jazz Classics») found by searching
+/// for the genre (`g.id`).
 async fn genre_songs(
     c: &Client,
     g: &Genre,
@@ -1544,11 +1544,6 @@ async fn genre_songs(
         return Ok(Vec::new());
     }
     let mut found = Vec::new();
-    match c.search(&g.id).await {
-        Ok(s) => found.extend(s.tracks),
-        Err(e) if e.status().is_some() => tracing::debug!("track search for {}: {e}", g.name),
-        Err(e) => return Err(e),
-    }
     let sources = match c.search_playlists(&g.id).await {
         Ok(p) => p,
         Err(e) if e.status().is_some() => {
@@ -1567,6 +1562,15 @@ async fn genre_songs(
             Ok(items) => found.extend(items.into_iter().filter_map(|i| i.track)),
             Err(ApiError::Cancelled) => return Err(ApiError::Cancelled),
             Err(e) => tracing::debug!("genre source {}: {e}", p.id),
+        }
+    }
+    // Searching songs for the genre word also matches artist names («Jazz
+    // Liberatorz» for Jazz), so it only fills up when the playlists fall short.
+    if generate::fresh(found.clone(), have).len() < want {
+        match c.search(&g.id).await {
+            Ok(s) => found.extend(s.tracks),
+            Err(e) if e.status().is_some() => tracing::debug!("track search for {}: {e}", g.name),
+            Err(e) => return Err(e),
         }
     }
     let mut picked = generate::fresh(found, have);
@@ -1627,5 +1631,427 @@ async fn preview(ctx: &Ctx, track: Track) {
         Ok(Err(f)) => ctx.emit(Event::PreviewFailed(f)),
         Err(e) if e.code() == Some("GEO_RESTRICTED") => ctx.emit(Event::PreviewFailed(PreviewFail::GeoRestricted)),
         Err(e) => ctx.emit(Event::PreviewFailed(PreviewFail::Other(err_text(&e)))),
+    }
+}
+
+/// Live tests against a real TIDAL account, ignored by default. They change only
+/// the playlist named by `TIDAL_LIVE_PLAYLIST` (its name must contain «Test»),
+/// put it back exactly as it was at the end, and delete every playlist they
+/// create (named «Live test … (delete me)»). Uses the app's saved login.
+///
+/// `TIDAL_LIVE_PLAYLIST=<id> cargo test live_ -- --ignored --nocapture --test-threads 1`
+#[cfg(test)]
+mod live {
+    use super::*;
+    use crate::api::{ItemKind, RadioSeed};
+    use crate::ops::analysis;
+    use std::time::{Duration, Instant};
+
+    struct W {
+        h: WorkerHandle,
+        /// Every event since the last job started.
+        seen: Vec<Event>,
+    }
+
+    impl W {
+        fn start() -> (Self, Vec<Playlist>) {
+            let paths = crate::store::Paths::new();
+            let cfg = crate::store::Config::load(&paths);
+            let player = PlayerHandle::spawn(0.0, || {});
+            let h = WorkerHandle::spawn(paths.token_file, paths.spotify_token_file, player, Arc::new(|| {}));
+            let mut w = W { h, seen: Vec::new() };
+            let auth = AuthConfig::new(&cfg.client_id, Some(cfg.client_secret.clone()), &cfg.redirect_uri);
+            w.h.send(Cmd::RestoreSession(auth));
+            let lists = w.until("login and playlists", |e| match e {
+                Event::LoggedOut => panic!("not logged in: log in with the app first"),
+                Event::Playlists(p) => Some(p.clone()),
+                _ => None,
+            });
+            (w, lists)
+        }
+
+        fn until<T>(&mut self, what: &str, mut f: impl FnMut(&Event) -> Option<T>) -> T {
+            let end = Instant::now() + Duration::from_secs(600);
+            while Instant::now() < end {
+                match self.h.events.recv_timeout(Duration::from_millis(200)) {
+                    Ok(Event::Error(e)) => panic!("{what}: error: {e}"),
+                    Ok(e) => {
+                        let r = f(&e);
+                        self.seen.push(e);
+                        if let Some(t) = r {
+                            return t;
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+            panic!("{what}: timed out");
+        }
+
+        /// Runs a job; returns its note and every event seen until it ended.
+        fn job(&mut self, what: &str, make: impl FnOnce(Job) -> Cmd) -> (Option<Note>, Vec<Event>) {
+            let job = Job::new();
+            let id = job.id;
+            self.seen.clear();
+            self.h.send(make(job));
+            let note = self.until(what, |e| match e {
+                Event::JobDone { job, note } if *job == id => Some(note.clone()),
+                Event::JobFailed { job, error } if *job == id => panic!("{what}: failed: {error}"),
+                _ => None,
+            });
+            (note, std::mem::take(&mut self.seen))
+        }
+
+        /// A job whose report event arrives before `JobDone`.
+        fn report<T>(
+            &mut self,
+            what: &str,
+            make: impl FnOnce(Job) -> Cmd,
+            mut f: impl FnMut(&Event) -> Option<T>,
+        ) -> T {
+            let job = Job::new();
+            let id = job.id;
+            self.h.send(make(job));
+            let mut got = None;
+            self.until(what, |e| {
+                if got.is_none() {
+                    got = f(e);
+                }
+                match e {
+                    Event::JobDone { job, .. } if *job == id => Some(()),
+                    Event::JobFailed { job, error } if *job == id => panic!("{what}: failed: {error}"),
+                    _ => None,
+                }
+            });
+            got.unwrap_or_else(|| panic!("{what}: no report"))
+        }
+
+        fn items(&mut self, pid: &str) -> Vec<PlaylistItem> {
+            self.h.send(Cmd::LoadItems(pid.to_owned()));
+            self.until("load items", |e| match e {
+                Event::Items { pid: p, items } if p == pid => Some(items.clone()),
+                Event::ItemsFailed { error, .. } => panic!("load items: {error}"),
+                _ => None,
+            })
+        }
+
+        fn created(events: &[Event]) -> Playlist {
+            events
+                .iter()
+                .find_map(|e| match e {
+                    Event::PlaylistCreated(p) => Some(p.clone()),
+                    _ => None,
+                })
+                .expect("a playlist was created")
+        }
+
+        fn delete(&mut self, p: &Playlist) {
+            assert!(p.name.starts_with("Live test"), "only deletes its own playlists: {}", p.name);
+            self.h.send(Cmd::DeletePlaylist(p.id.clone()));
+            self.until("delete", |e| matches!(e, Event::PlaylistDeleted(id) if *id == p.id).then_some(()));
+        }
+    }
+
+    fn desc(t: &Track) -> String {
+        let kind = if t.kind == ItemKind::Video { "video" } else { "song" };
+        format!("{} — {} [{kind} {}]", t.full_title(), t.artist_line(), t.id)
+    }
+
+    fn list(what: &str, tracks: impl IntoIterator<Item = Track>) {
+        for t in tracks {
+            println!("  {what}: {}", desc(&t));
+        }
+    }
+
+    fn refs(items: &[PlaylistItem]) -> Vec<ItemRef> {
+        items.iter().map(|i| i.r.clone()).collect()
+    }
+
+    #[test]
+    #[ignore]
+    fn live_writing_features() {
+        let Ok(pid) = std::env::var("TIDAL_LIVE_PLAYLIST") else {
+            panic!("set TIDAL_LIVE_PLAYLIST to the id of a playlist named «Test …»");
+        };
+        let (mut w, lists) = W::start();
+        let test = lists.iter().find(|p| p.id == pid).expect("playlist not found").clone();
+        assert!(test.name.contains("Test") && test.owned, "refusing «{}»: not an own Test playlist", test.name);
+        let baseline = w.items(&pid);
+        println!("baseline: {} items in «{}»", baseline.len(), test.name);
+        let pl = || vec![test.clone()];
+
+        // Upgrade sound quality: swap up to two songs in place.
+        let hits = w.report(
+            "find better sound",
+            |job| Cmd::FindBetter { playlists: pl(), mode: BetterMode::Quality { atmos: false }, job },
+            |e| match e {
+                Event::Better { hits, .. } => Some(hits.clone()),
+                _ => None,
+            },
+        );
+        println!("sound quality: {} songs can sound better", hits.len());
+        let swaps: Vec<(PlaylistItem, Track)> =
+            hits.iter().take(2).map(|h| (h.item.clone(), h.better.clone().unwrap())).collect();
+        if !swaps.is_empty() {
+            let n = swaps.len();
+            let (note, _) =
+                w.job("replace (quality)", |job| Cmd::Replace { pid: pid.clone(), swaps: swaps.clone(), job });
+            assert!(matches!(note, Some(Note::Replaced(x)) if x == n));
+            let now = w.items(&pid);
+            for (old, new) in &swaps {
+                let pos = baseline.iter().position(|i| i.item_id == old.item_id).unwrap();
+                assert_eq!(now[pos].r.id, new.id, "swapped in place");
+                assert!(
+                    crate::ops::upgrade::quality(now[pos].track.as_ref().unwrap(), false)
+                        > crate::ops::upgrade::quality(&old.track.clone().unwrap(), false)
+                );
+            }
+            println!("sound quality: swapped {n} in place, better quality confirmed");
+        }
+
+        // Clean versions.
+        let hits = w.report(
+            "find clean",
+            |job| Cmd::FindBetter { playlists: pl(), mode: BetterMode::Clean, job },
+            |e| match e {
+                Event::Better { hits, .. } => Some(hits.clone()),
+                _ => None,
+            },
+        );
+        let found: Vec<_> = hits.iter().filter(|h| h.better.is_some()).collect();
+        println!("clean versions: {} explicit, {} with a clean version", hits.len(), found.len());
+        list("explicit, checked", hits.iter().map(|h| h.track.clone()));
+        if let Some(h) = found.first() {
+            let swaps = vec![(h.item.clone(), h.better.clone().unwrap())];
+            w.job("replace (clean)", |job| Cmd::Replace { pid: pid.clone(), swaps, job });
+            let now = w.items(&pid);
+            assert!(
+                now.iter()
+                    .any(|i| i.track.as_ref().is_some_and(|t| t.id == h.better.as_ref().unwrap().id && !t.explicit))
+            );
+            println!("clean versions: swapped «{}»", h.track.title);
+        }
+
+        // Recommendations: add two.
+        let cur = w.items(&pid);
+        let seeds: Vec<String> =
+            cur.iter().filter(|i| i.r.kind == ItemKind::Track).take(3).map(|i| i.r.id.clone()).collect();
+        let have: Vec<Track> = cur.iter().filter_map(|i| i.track.clone()).collect();
+        let recs = w.report(
+            "recommend",
+            |job| Cmd::Recommend { pid: pid.clone(), seeds, have, job },
+            |e| match e {
+                Event::Recommendations { recs, .. } => Some(recs.clone()),
+                _ => None,
+            },
+        );
+        let add: Vec<ItemRef> = recs.iter().take(2).map(|r| r.track.item_ref()).collect();
+        let (note, _) = w.job("add recommendations", |job| Cmd::AddItems {
+            pid: pid.clone(),
+            refs: add.clone(),
+            before: None,
+            skip_dups: true,
+            job,
+        });
+        println!("recommendations: {} found, added: {note:?}", recs.len());
+        list("seed", cur.iter().filter(|i| i.r.kind == ItemKind::Track).take(3).filter_map(|i| i.track.clone()));
+        list("recommended and added", recs.iter().take(2).map(|r| r.track.clone()));
+        assert_eq!(w.items(&pid).len(), cur.len() + add.len());
+
+        // Videos: add a music video, find it, swap it for its song.
+        let video = ItemRef { kind: ItemKind::Video, id: "43399557".into() };
+        w.job("add video", |job| Cmd::AddItems {
+            pid: pid.clone(),
+            refs: vec![video.clone()],
+            before: None,
+            skip_dups: false,
+            job,
+        });
+        let vids = w.report(
+            "find videos",
+            |job| Cmd::FindVideos { playlists: pl(), job },
+            |e| match e {
+                Event::Videos(v) => Some(v.clone()),
+                _ => None,
+            },
+        );
+        let (_, vit) = vids.iter().find(|(_, i)| i.r == video).expect("video listed").clone();
+        let meta = vit.track.clone().expect("video metadata");
+        let music = w.report(
+            "find music version",
+            |job| Cmd::FindMusic { videos: vec![(vit.item_id.clone(), meta.clone())], job },
+            |e| match e {
+                Event::MusicVersions(m) => Some(m.clone()),
+                _ => None,
+            },
+        );
+        let song = music[0].1.clone().expect("a music version of the video");
+        println!("videos: «{}» → «{}» by {}", meta.title, song.title, song.artist_line());
+        list("video added, then swapped", [meta.clone()]);
+        list("its song", [song.clone()]);
+        w.job("replace video", |job| Cmd::Replace { pid: pid.clone(), swaps: vec![(vit.clone(), song.clone())], job });
+        let now = w.items(&pid);
+        assert!(!now.iter().any(|i| i.r == video) && now.iter().any(|i| i.r.id == song.id));
+
+        // Across playlists: add a song from another playlist, then remove only this copy.
+        let other = lists
+            .iter()
+            .find(|p| p.id != pid && p.owned && p.number_of_items.unwrap_or(0) > 0)
+            .expect("another playlist")
+            .clone();
+        let other_items = w.items(&other.id);
+        let shared = other_items
+            .iter()
+            .find(|i| i.r.kind == ItemKind::Track && !now.iter().any(|n| n.r == i.r))
+            .expect("a song")
+            .clone();
+        w.job("add shared song", |job| Cmd::AddItems {
+            pid: pid.clone(),
+            refs: vec![shared.r.clone()],
+            before: None,
+            skip_dups: false,
+            job,
+        });
+        let mine = w.items(&pid);
+        let lists2: Vec<(&str, &[PlaylistItem])> = vec![(pid.as_str(), &mine), (other.id.as_str(), &other_items)];
+        let groups = analysis::across_playlists(&lists2, false, &|_| None);
+        let g = groups.iter().find(|g| g.places.iter().any(|(p, _)| *p == other.id)).expect("found in both");
+        let here: Vec<(ItemRef, String)> =
+            g.places.iter().filter(|(p, _)| *p == pid).map(|(_, i)| (shared.r.clone(), i.clone())).collect();
+        w.job("remove copy", |job| Cmd::RemoveItems { pid: pid.clone(), items: here, job });
+        assert!(!w.items(&pid).iter().any(|i| i.r == shared.r));
+        assert_eq!(refs(&w.items(&other.id)), refs(&other_items), "the other playlist is untouched");
+        println!("across playlists: «{}» found in «{}» too; removed only here", g.track.title, other.name);
+        list("added, found in both, removed here", [g.track.clone()]);
+
+        // Trim to about ten minutes less.
+        let cur = w.items(&pid);
+        let total: u32 = cur.iter().filter_map(|i| i.track.as_ref()).map(|t| t.duration_secs).sum();
+        let remove = analysis::trim_to(&cur, total.saturating_sub(600));
+        let victims: Vec<(ItemRef, String)> =
+            cur.iter().filter(|i| remove.contains(&i.item_id)).map(|i| (i.r.clone(), i.item_id.clone())).collect();
+        w.job("trim", |job| Cmd::RemoveItems { pid: pid.clone(), items: victims.clone(), job });
+        let after: u32 = w.items(&pid).iter().filter_map(|i| i.track.as_ref()).map(|t| t.duration_secs).sum();
+        println!("trim: {} → {} (removed {})", format_secs(total), format_secs(after), victims.len());
+        list("trimmed off", cur.iter().filter(|i| remove.contains(&i.item_id)).filter_map(|i| i.track.clone()));
+        assert!(after < total && total - after <= 900);
+
+        // New playlists: generate, a song's radio, one of the user's mixes. Each is checked, then deleted.
+        let (_, ev) = w.job("generate", |job| Cmd::Generate {
+            genres: vec![Genre { id: "Jazz".into(), name: "Jazz".into() }],
+            count: 5,
+            names: vec!["Live test generate (delete me)".into()],
+            description: String::new(),
+            known: Vec::new(),
+            job,
+        });
+        let gen_pl = W::created(&ev);
+        let gen_items = w.items(&gen_pl.id);
+        println!("generate: «{}» with {} songs", gen_pl.name, gen_items.len());
+        list("generated (Jazz)", gen_items.iter().filter_map(|i| i.track.clone()));
+        w.delete(&gen_pl);
+        let seed_item = cur.iter().find(|i| i.r.kind == ItemKind::Track).unwrap();
+        list("radio seed", seed_item.track.clone());
+        let seed = seed_item.r.id.clone();
+        let (_, ev) = w.job("song radio", |job| Cmd::SaveMix {
+            source: MixSource::Radio(RadioSeed::Track(seed)),
+            name: "Live test radio (delete me)".into(),
+            description: String::new(),
+            job,
+        });
+        let radio = W::created(&ev);
+        let radio_items = w.items(&radio.id);
+        let n = radio_items.len();
+        println!("radio: «{}» with {n} songs", radio.name);
+        list("radio", radio_items.iter().filter_map(|i| i.track.clone()));
+        assert!(n > 0);
+        w.delete(&radio);
+        let mixes = w.report("load mixes", Cmd::LoadMixes, |e| match e {
+            Event::Mixes(m) => Some(m.clone()),
+            _ => None,
+        });
+        let mix = mixes.first().expect("at least one mix").clone();
+        let (_, ev) = w.job("save mix", |job| Cmd::SaveMix {
+            source: MixSource::Playlist(mix.id.clone()),
+            name: "Live test mix (delete me)".into(),
+            description: String::new(),
+            job,
+        });
+        let saved = W::created(&ev);
+        let mix_items = w.items(&saved.id);
+        let n = mix_items.len();
+        println!("mixes: {} found; «{}» saved with {n} songs", mixes.len(), mix.name);
+        list("mix", mix_items.iter().filter_map(|i| i.track.clone()));
+        assert!(n > 0);
+        w.delete(&saved);
+
+        // Undo everything: back to the baseline, order included.
+        w.job("restore", |job| Cmd::Restore { pid: pid.clone(), target: refs(&baseline), job });
+        assert_eq!(refs(&w.items(&pid)), refs(&baseline), "restored exactly");
+        println!("restore: «{}» is back to its {} items, in order", test.name, baseline.len());
+    }
+
+    /// Swaps for sound quality and clean versions with songs known to have them:
+    /// Billie Jean (single version, lossless; a Hi-Res release of the same
+    /// recording exists) and Bodak Yellow (explicit; a clean release exists).
+    #[test]
+    #[ignore]
+    fn live_better_versions() {
+        let Ok(pid) = std::env::var("TIDAL_LIVE_PLAYLIST") else {
+            panic!("set TIDAL_LIVE_PLAYLIST to the id of a playlist named «Test …»");
+        };
+        let (mut w, lists) = W::start();
+        let test = lists.iter().find(|p| p.id == pid).expect("playlist not found").clone();
+        assert!(test.name.contains("Test") && test.owned, "refusing «{}»: not an own Test playlist", test.name);
+        let baseline = w.items(&pid);
+        let (lossless, explicit) = (ItemRef::track("4841305"), ItemRef::track("195394248"));
+        w.job("add test songs", |job| Cmd::AddItems {
+            pid: pid.clone(),
+            refs: vec![lossless.clone(), explicit.clone()],
+            before: None,
+            skip_dups: false,
+            job,
+        });
+        for (mode, song, what) in [
+            (BetterMode::Quality { atmos: false }, &lossless, "sound quality"),
+            (BetterMode::Clean, &explicit, "clean version"),
+        ] {
+            let hits = w.report(
+                what,
+                |job| Cmd::FindBetter { playlists: vec![test.clone()], mode, job },
+                |e| match e {
+                    Event::Better { hits, .. } => Some(hits.clone()),
+                    _ => None,
+                },
+            );
+            let h = hits.iter().find(|h| h.item.r == *song).unwrap_or_else(|| panic!("{what}: not listed"));
+            let new = h.better.clone().unwrap_or_else(|| panic!("{what}: nothing found"));
+            let pos = w.items(&pid).iter().position(|i| i.item_id == h.item.item_id).unwrap();
+            w.job(what, |job| Cmd::Replace { pid: pid.clone(), swaps: vec![(h.item.clone(), new.clone())], job });
+            let now = w.items(&pid);
+            let got = now[pos].track.clone().expect("replacement in place");
+            assert_eq!(got.id, new.id, "{what}: swapped in place");
+            match mode {
+                BetterMode::Quality { .. } => assert!(got.media_tags.iter().any(|t| t == "HIRES_LOSSLESS")),
+                BetterMode::Clean => assert!(!got.explicit),
+            }
+            println!(
+                "{what}: «{}» ({:?}, explicit {}) → «{}» ({:?}, explicit {}) on «{}»",
+                h.track.full_title(),
+                h.track.media_tags,
+                h.track.explicit,
+                got.full_title(),
+                got.media_tags,
+                got.explicit,
+                got.album.unwrap_or_default()
+            );
+        }
+        w.job("restore", |job| Cmd::Restore { pid: pid.clone(), target: refs(&baseline), job });
+        assert_eq!(refs(&w.items(&pid)), refs(&baseline), "restored exactly");
+        println!("restore: «{}» is back to its {} items, in order", test.name, baseline.len());
+    }
+
+    fn format_secs(s: u32) -> String {
+        crate::api::format_duration(s)
     }
 }

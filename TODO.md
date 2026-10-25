@@ -10,12 +10,12 @@ for third-party apps (genres did), so check each one against the live API before
       (`egui_system_font_provider`, DirectWrite) compile for Windows but have not been seen running there.
 - [ ] **Screen reader check of the running app** (AT-SPI on Linux). The headless tests
       cover names through AccessKit, but the live window has not been checked.
-- [ ] **Live test of writing features:** generate a playlist, swap videos for songs,
-      add recommendations, upgrade sound quality, swap clean versions, save a radio,
-      remove copies across playlists, trim, save my mixes as playlists, on a real account.
 
 ## Done
 
+- Live test of every writing feature on a real account (`cargo test live_ -- --ignored`, see
+  `src/worker.rs`): all passed, and the test playlist was restored exactly. It found that the
+  genre generator picked up artists named after the genre (fixed).
 - Release 0.2.0 built (`dist/0.2.0/`, stripped, tests and clippy clean).
 - Upgrade sound quality (same ISRC; Hi-Res, lossless, optionally Dolby Atmos).
   Note: `/tracks?filter[isrc]=` with several ISRCs returns only one track per ISRC, so the
