@@ -8,10 +8,23 @@ use crate::store::{Config, MotionChoice, ThemeChoice};
 const FOCUS_DARK: Color32 = Color32::from_rgb(0xFF, 0xD5, 0x4F);
 const FOCUS_LIGHT: Color32 = Color32::from_rgb(0x00, 0x4F, 0xC4);
 
+/// egui's black-and-white emoji fonts, used only when the system has no
+/// (colour) emoji font with the character.
+const MONO_EMOJI: [&str; 2] = ["NotoEmoji-Regular", "emoji-icon-font"];
+
 /// Noto Sans for text (regular weight reads better than the default light face),
-/// DejaVu Sans as fallback for symbols such as ⚠ ✓ ▶ ↻ ⠿.
+/// DejaVu Sans as fallback for symbols such as ⚠ ✓ ▶ ↻ ⠿. Emoji and scripts
+/// these lack (😀 🇳🇴 日本語) come from the system's fonts, in colour where the
+/// font has colour (Noto Color Emoji, Segoe UI Emoji), else from egui's
+/// black-and-white emoji, so playlist and song names show what they say.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
+    // Taken out of the families so the system's colour emoji win over them.
+    let mono: Vec<(String, egui::FontData)> =
+        MONO_EMOJI.iter().filter_map(|n| fonts.font_data.remove(*n).map(|d| ((*n).to_owned(), (*d).clone()))).collect();
+    for list in fonts.families.values_mut() {
+        list.retain(|f| !MONO_EMOJI.contains(&f.as_str()));
+    }
     fonts.font_data.insert(
         "noto-sans".into(),
         std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../../assets/fonts/NotoSans-Regular.ttf"))),
@@ -28,6 +41,95 @@ pub fn install_fonts(ctx: &egui::Context) {
         list.push("dejavu-sans".into());
     }
     ctx.set_fonts(fonts);
+    // Providers are asked in order: the system first, then the bundled emoji.
+    let system = std::sync::Arc::new(egui_system_font_provider::SystemFontProvider::new());
+    ctx.add_font_provider(system.clone());
+    ctx.add_font_provider(std::sync::Arc::new(MonoEmoji(mono)));
+    ctx.add_glyph_rasterizer(emoji_style(system));
+}
+
+/// Fonts holding only the system's colour emoji font, for [`emoji_style`].
+type EmojiFonts = std::sync::Mutex<epaint::text::Fonts>;
+
+/// Draws clusters that should look like emoji (😀, ❤️ with U+FE0F, 👍🏽) with
+/// the system's colour emoji font. Noto Sans and DejaVu have black-and-white
+/// forms of some (❤ ☕ ☀ 😀 😊), which would otherwise win.
+fn emoji_style(system: std::sync::Arc<egui_system_font_provider::SystemFontProvider>) -> epaint::text::GlyphRasterizer {
+    use epaint::text::{FontProvider as _, GlyphBitmap, RasterizedGlyph};
+    // Found on first use, so start-up does not wait for the font scan.
+    let fonts: std::sync::OnceLock<Option<EmojiFonts>> = std::sync::OnceLock::new();
+    epaint::text::GlyphRasterizer::new("tidal_editor::emoji_style", move |req| {
+        if !epaint::text::has_emoji_presentation(req.cluster) {
+            return None;
+        }
+        let fonts = fonts
+            .get_or_init(|| {
+                let family = egui::FontFamily::Proportional;
+                // Probes that plain-text fonts such as DejaVu lack, so the answer is an emoji font.
+                let found = ["🥰", "🫠", "🦀"]
+                    .iter()
+                    .filter_map(|c| system.font_for(&epaint::text::FallbackRequest { cluster: c, family: &family }))
+                    .find(|f| has_colour(&f.data))?;
+                let mut defs = egui::FontDefinitions::empty();
+                defs.font_data.insert("emoji".into(), std::sync::Arc::new(found.data));
+                defs.families.insert(family, vec!["emoji".into()]);
+                Some(std::sync::Mutex::new(epaint::text::Fonts::new(Default::default(), defs)))
+            })
+            .as_ref()?;
+        let mut fonts = fonts.lock().ok()?;
+        let font_id = egui::FontId::proportional(req.font_size_px);
+        if !fonts.with_pixels_per_point(1.0).has_glyph(&font_id, req.cluster.chars().next()?) {
+            return None;
+        }
+        let job = egui::text::LayoutJob::simple_singleline(req.cluster.to_owned(), font_id, Color32::WHITE);
+        let galley = fonts.layout_uncached(1.0, std::sync::Arc::new(job));
+        // One visible glyph (selectors such as U+FE0F come out empty); more
+        // means the font did not join the cluster: leave it to the normal fonts.
+        let glyphs = &galley.rows.first()?.row.glyphs;
+        let [g] = glyphs.iter().filter(|g| !g.uv_rect.is_nothing()).collect::<Vec<_>>()[..] else { return None };
+        let uv = g.uv_rect;
+        let advance: f32 = glyphs.iter().map(|g| g.advance_width).sum();
+        let atlas = fonts.texture_atlas().image();
+        let [x0, y0] = uv.min.map(usize::from);
+        let [w, h] = [usize::from(uv.max[0]) - x0, usize::from(uv.max[1]) - y0];
+        let pixels = (0..h).flat_map(|y| (0..w).map(move |x| (x0 + x, y0 + y))).map(|p| atlas[p]).collect();
+        Some(RasterizedGlyph {
+            bitmap: GlyphBitmap { image: egui::ColorImage::new([w, h], pixels), offset_px: uv.offset, is_color: true },
+            advance_px: advance,
+        })
+    })
+    .with_priority(epaint::text::FontPriority::Highest)
+}
+
+/// Does the font have colour glyphs (`COLR`, `CBDT` or `sbix`)?
+fn has_colour(data: &egui::FontData) -> bool {
+    use skrifa::raw::TableProvider as _;
+    skrifa::FontRef::from_index((*data.font).as_ref(), data.index)
+        .is_ok_and(|f| f.colr().is_ok() || f.cbdt().is_ok() || f.sbix().is_ok())
+}
+
+/// Last resort for emoji: the first of egui's black-and-white fonts that has the character.
+struct MonoEmoji(Vec<(String, egui::FontData)>);
+
+impl epaint::text::FontProvider for MonoEmoji {
+    fn font_for(&self, request: &epaint::text::FallbackRequest<'_>) -> Option<epaint::text::FontInsert> {
+        use skrifa::MetadataProvider as _;
+        let c = request.cluster.chars().next()?;
+        let (name, data) = self.0.iter().find(|(_, d)| {
+            skrifa::FontRef::from_index((*d.font).as_ref(), d.index)
+                .ok()
+                .and_then(|f| f.charmap().map(c))
+                .is_some_and(|g| g != skrifa::GlyphId::NOTDEF)
+        })?;
+        Some(epaint::text::FontInsert::new(
+            name,
+            data.clone(),
+            vec![epaint::text::InsertFontFamily {
+                family: request.family.clone(),
+                priority: epaint::text::FontPriority::Lowest,
+            }],
+        ))
+    }
 }
 
 pub fn apply(ctx: &egui::Context, cfg: &Config, reduced_motion: bool) {
@@ -159,5 +261,26 @@ pub fn reduced_motion(cfg: &Config) -> bool {
         MotionChoice::Reduced => true,
         MotionChoice::Full => false,
         MotionChoice::System => system_reduced_motion(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use epaint::text::{FallbackRequest, FontProvider as _};
+
+    #[test]
+    fn bundled_emoji_cover_common_smileys() {
+        let fonts = egui::FontDefinitions::default();
+        let mono = super::MONO_EMOJI
+            .iter()
+            .filter_map(|n| fonts.font_data.get(*n).map(|d| ((*n).to_owned(), (**d).clone())))
+            .collect();
+        let p = super::MonoEmoji(mono);
+        let family = egui::FontFamily::Proportional;
+        for c in ["😀", "😂", "🎶", "🚗", "💔", "👍"] {
+            let got = p.font_for(&FallbackRequest { cluster: c, family: &family });
+            assert!(got.is_some_and(|f| f.name == "NotoEmoji-Regular"), "{c}");
+        }
+        assert!(p.font_for(&FallbackRequest { cluster: "日", family: &family }).is_none());
     }
 }

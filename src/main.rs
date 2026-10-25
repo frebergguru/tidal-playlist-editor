@@ -23,6 +23,9 @@ fn main() -> eframe::Result {
             .with_app_id("tidal-playlist-editor")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([720.0, 480.0]),
+        // `style::install_fonts` adds the system font lookup itself, ahead of
+        // the black-and-white emoji fallback.
+        system_font_fallback: false,
         ..Default::default()
     };
     eframe::run_native("TIDAL Playlist Editor", options, Box::new(|cc| Ok(Box::new(ui::App::new(cc)))))

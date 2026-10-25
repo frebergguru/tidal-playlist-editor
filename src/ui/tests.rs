@@ -524,3 +524,44 @@ fn generate_dialog_needs_a_genre() {
     assert!(h.state().dialog.is_none());
     wait_for_log(&mut h, "Generating playlists: Pop, Jazz, Bossa nova");
 }
+
+/// Emoji in names must lay out (the test harness panics on a missing glyph).
+#[test]
+fn emoji_in_names_are_drawn() {
+    let mut h = harness();
+    logged_in(&mut h);
+    {
+        let app = h.state_mut();
+        app.playlists[0].name = "Road trip 🚗🎶 😀😂".into();
+        app.items.insert("p1".into(), vec![item(1, "Happy 😊 song 💔", true)]);
+    }
+    h.run();
+    assert!(h.query_all_by_label_contains("Road trip 🚗🎶 😀😂").count() >= 1);
+    assert!(h.query_all_by_label_contains("Happy 😊 song 💔").count() >= 1);
+}
+
+#[test]
+#[ignore = "writes a screenshot for checking emoji by eye"]
+fn emoji_screenshot() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/screens");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut h = harness();
+    logged_in(&mut h);
+    {
+        let app = h.state_mut();
+        app.playlists[0].name = "Road trip 🚗🎶 😀😂🥰".into();
+        app.playlists[1].name = "Chill ☕️ ❤️ ✨ 🇳🇴 👍🏽 🧑‍🎤 🫶 🥹 🪩".into();
+        let names = [
+            "Happy 😊 song",
+            "Love ❤️ ❤ ♥ 💔 ☕️ ☀️ ✔️ 1️⃣",
+            "Flags 🇳🇴🇸🇪🇺🇸",
+            "Skin 👋🏻👋🏿",
+            "New 🫠🫶🪿🩷",
+            "Sym ★ ♪ ☀ ✔ ⚡",
+        ];
+        let items = names.iter().enumerate().map(|(n, t)| item(n + 1, t, true)).collect();
+        app.items.insert("p1".into(), items);
+    }
+    h.run();
+    h.render().unwrap().save(dir.join("emoji.png")).unwrap();
+}
