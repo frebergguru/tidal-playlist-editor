@@ -170,7 +170,6 @@ pub enum Cmd {
         have: Vec<Track>,
         job: Job,
     },
-    LoadGenres,
     /// New playlists of songs from `genres`: one per genre when `names` has
     /// one name per genre, else one mixed playlist named `names[0]`. Songs in
     /// the `known` playlists are left out.
@@ -310,7 +309,6 @@ pub enum Event {
         error: String,
     },
     Unavailable(Vec<UnavailableHit>),
-    Genres(Result<Vec<Genre>, String>),
     Recommendations {
         pid: String,
         recs: Vec<Recommendation>,
@@ -562,11 +560,6 @@ async fn handle(ctx: Ctx, cmd: Cmd) {
                 Ok(()) => ctx.emit(Event::Note(Note::Favourited { n: ids.len(), add })),
                 Err(e) => ctx.emit(Event::Error(err_text(&e))),
             }
-        }
-        Cmd::LoadGenres => {
-            let locale = if std::ptr::eq(crate::i18n::current(), &crate::i18n::NB) { "nb-NO" } else { "en-US" };
-            let r = async { ctx.client().await?.genres(locale).await }.await;
-            ctx.emit(Event::Genres(r.map_err(|e| err_text(&e))));
         }
         Cmd::Preview(track) => preview(&ctx, track).await,
         Cmd::SpotifyRestore(cfg) => {
@@ -1283,9 +1276,9 @@ async fn load_playlists(ctx: &Ctx) {
 /// TIDAL playlists searched per genre for songs.
 const GENRE_SOURCES: usize = 8;
 
-/// Up to `want` playable songs for a genre that are not in `have`: tracks from
-/// TIDAL playlists and tracks found by searching the genre's name, kept when
-/// TIDAL's genre tags agree (or are missing).
+/// Up to `want` playable songs for a genre that are not in `have`: tracks
+/// found by searching TIDAL for the genre (`g.id`), mostly from its own
+/// editorial playlists such as «Jazz Classics».
 async fn genre_songs(
     c: &Client,
     g: &Genre,
@@ -1297,12 +1290,12 @@ async fn genre_songs(
         return Ok(Vec::new());
     }
     let mut found = Vec::new();
-    match c.search(&g.name).await {
+    match c.search(&g.id).await {
         Ok(s) => found.extend(s.tracks),
         Err(e) if e.status().is_some() => tracing::debug!("track search for {}: {e}", g.name),
         Err(e) => return Err(e),
     }
-    let sources = match c.search_playlists(&g.name).await {
+    let sources = match c.search_playlists(&g.id).await {
         Ok(p) => p,
         Err(e) if e.status().is_some() => {
             tracing::debug!("playlist search for {}: {e}", g.name);
@@ -1310,8 +1303,8 @@ async fn genre_songs(
         }
         Err(e) => return Err(e),
     };
-    // Gather about three times what is needed, so the genre check and the
-    // songs already owned leave enough.
+    // Gather about three times what is needed, so leaving out the songs
+    // already owned still leaves enough to pick from at random.
     for p in sources.iter().take(GENRE_SOURCES) {
         if found.len() >= want * 3 {
             break;
@@ -1322,22 +1315,7 @@ async fn genre_songs(
             Err(e) => tracing::debug!("genre source {}: {e}", p.id),
         }
     }
-    let mut picked = Vec::new();
-    for chunk in generate::fresh(found, have).chunks(crate::api::client::FILTER_BATCH) {
-        let ids: Vec<String> = chunk.iter().map(|t| t.id.clone()).collect();
-        let tags = match c.track_genres(&ids, cancel).await {
-            Ok(t) => t,
-            Err(ApiError::Cancelled) => return Err(ApiError::Cancelled),
-            Err(e) => {
-                tracing::debug!("genre tags: {e}");
-                Default::default()
-            }
-        };
-        picked.extend(chunk.iter().filter(|t| generate::matches_genre(t, &g.id, &tags)).cloned());
-        if picked.len() >= want {
-            break;
-        }
-    }
+    let mut picked = generate::fresh(found, have);
     picked.truncate(want);
     Ok(picked)
 }

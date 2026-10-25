@@ -69,8 +69,12 @@ impl RecommendDialog {
 }
 
 pub struct GenerateDialog {
-    /// Genre ids, kept in the order TIDAL lists them when sent.
+    /// The built-in genres, then any the user typed in.
+    pub genres: Vec<Genre>,
+    /// Genre ids (search terms); sent in the order of `genres`.
     pub picked: HashSet<String>,
+    /// Text of the «Other genre» field.
+    pub other: String,
     pub find: String,
     pub count: usize,
     pub per_genre: bool,
@@ -247,9 +251,11 @@ impl Dialog {
         let pick = vec![false; recs.len()];
         Dialog::Recommend(Box::new(RecommendDialog { pid, recs, pick, rows, searching: false }))
     }
-    pub fn generate() -> Self {
+    pub fn generate(norwegian: bool) -> Self {
         Dialog::Generate(Box::new(GenerateDialog {
+            genres: crate::ops::generate::genres(norwegian),
             picked: HashSet::new(),
+            other: String::new(),
             find: String::new(),
             count: 50,
             per_genre: false,
@@ -965,52 +971,53 @@ fn recommend(app: &mut App, ctx: &egui::Context, r: &mut RecommendDialog, first:
 
 fn generate(app: &mut App, ctx: &egui::Context, g: &mut GenerateDialog, first: bool) -> Outcome {
     let tr = app.tr;
-    let genres: Option<Result<Vec<Genre>, String>> = app.genres.clone();
-    let mut retry = false;
     let (esc, (ok, cancel)) = frame(ctx, "generate", tr.generate_playlists, |ui| {
         ui.label(tr.generate_explain);
         ui.add_space(4.0);
-        match &genres {
-            None => {
-                ui.horizontal(|ui| {
-                    super::style::busy(ui, app.reduced_motion);
-                    ui.label(tr.loading_genres);
-                });
-            }
-            Some(Err(e)) => {
-                ui.label(RichText::new(format!("⚠ {}: {e}", tr.genres_failed)).strong());
-                retry = ui.button(tr.try_again).clicked();
-            }
-            Some(Ok(list)) => {
-                ui.strong(i18n::fmt(tr.genres_picked_n, &[&g.picked.len().to_string()]));
-                if list.len() > 12 {
-                    labelled_text(ui, tr.filter_genres, &mut g.find, first, false);
-                }
-                let find = g.find.trim().to_lowercase();
-                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        for (n, genre) in list.iter().enumerate() {
-                            // Picked genres stay visible while filtering.
-                            let mut on = g.picked.contains(&genre.id);
-                            if !on && !find.is_empty() && !genre.name.to_lowercase().contains(&find) {
-                                continue;
-                            }
-                            let r = ui.checkbox(&mut on, &genre.name);
-                            if first && n == 0 && list.len() <= 12 {
-                                r.request_focus();
-                            }
-                            if r.changed() {
-                                if on {
-                                    g.picked.insert(genre.id.clone());
-                                } else {
-                                    g.picked.remove(&genre.id);
-                                }
-                            }
+        ui.strong(i18n::fmt(tr.genres_picked_n, &[&g.picked.len().to_string()]));
+        labelled_text(ui, tr.filter_genres, &mut g.find, first, false);
+        let find = g.find.trim().to_lowercase();
+        egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for genre in &g.genres {
+                    // Picked genres stay visible while filtering.
+                    let mut on = g.picked.contains(&genre.id);
+                    if !on && !find.is_empty() && !genre.name.to_lowercase().contains(&find) {
+                        continue;
+                    }
+                    if ui.checkbox(&mut on, &genre.name).changed() {
+                        if on {
+                            g.picked.insert(genre.id.clone());
+                        } else {
+                            g.picked.remove(&genre.id);
                         }
-                    });
-                });
+                    }
+                }
+            });
+        });
+        let l = ui.label(tr.other_genre);
+        ui.horizontal(|ui| {
+            let field = ui
+                .add(egui::TextEdit::singleline(&mut g.other).desired_width((ui.available_width() - 120.0).max(120.0)))
+                .labelled_by(l.id);
+            let enter = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            let text = g.other.trim().to_owned();
+            let add = ui.add_enabled(!text.is_empty(), egui::Button::new(tr.add_genre));
+            if (add.clicked() || enter) && !text.is_empty() {
+                // Typing a genre that is already listed just ticks it.
+                let low = text.to_lowercase();
+                let id = match g.genres.iter().find(|x| x.name.to_lowercase() == low || x.id.to_lowercase() == low) {
+                    Some(x) => x.id.clone(),
+                    None => {
+                        g.genres.push(Genre { id: text.clone(), name: text });
+                        g.genres.last().map(|x| x.id.clone()).unwrap_or_default()
+                    }
+                };
+                g.picked.insert(id);
+                g.other.clear();
+                g.find.clear();
             }
-        }
+        });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let per = g.per_genre && g.picked.len() > 1;
@@ -1029,12 +1036,8 @@ fn generate(app: &mut App, ctx: &egui::Context, g: &mut GenerateDialog, first: b
         ui.checkbox(&mut g.skip_known, tr.skip_known_songs);
         ok_cancel(ui, tr, tr.generate, !g.picked.is_empty() && g.count > 0)
     });
-    if retry {
-        app.genres = None;
-        app.worker.send(Cmd::LoadGenres);
-    }
-    if ok && let Some(Ok(list)) = &genres {
-        let chosen: Vec<Genre> = list.iter().filter(|x| g.picked.contains(&x.id)).cloned().collect();
+    if ok {
+        let chosen: Vec<Genre> = g.genres.iter().filter(|x| g.picked.contains(&x.id)).cloned().collect();
         let joined = chosen.iter().map(|x| x.name.as_str()).collect::<Vec<_>>().join(", ");
         let names = if g.per_genre && chosen.len() > 1 {
             chosen.iter().map(|x| i18n::fmt(tr.generated_name, &[&x.name])).collect()

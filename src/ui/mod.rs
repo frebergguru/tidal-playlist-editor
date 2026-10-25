@@ -15,7 +15,7 @@ use std::sync::Arc;
 use egui::{Key, KeyboardShortcut, Modifiers};
 
 use crate::api::auth::AuthConfig;
-use crate::api::{Album, Artist, Genre, ItemRef, Playlist, PlaylistItem, SearchResults, Track, User};
+use crate::api::{Album, Artist, ItemRef, Playlist, PlaylistItem, SearchResults, Track, User};
 use crate::i18n::{self, Tr};
 use crate::ops::analysis::SortKey;
 use crate::ops::recommend::{self, Recommendation};
@@ -140,8 +140,6 @@ pub struct App {
     pub items: HashMap<String, Vec<PlaylistItem>>,
     pub loading: HashSet<String>,
     pub views: HashMap<String, ViewState>,
-    /// TIDAL's genre list, loaded the first time «Generate playlists» opens.
-    pub genres: Option<Result<Vec<Genre>, String>>,
     /// Seed rows of a pending recommendation search, per playlist.
     pub recommend_rows: HashMap<String, HashSet<String>>,
     pub undo: HashMap<String, Vec<Vec<ItemRef>>>,
@@ -197,7 +195,6 @@ impl App {
             loading: HashSet::new(),
             views: HashMap::new(),
             recommend_rows: HashMap::new(),
-            genres: None,
             undo: HashMap::new(),
             redo: HashMap::new(),
             search: SearchState {
@@ -641,7 +638,6 @@ impl App {
                     .collect();
                 self.open_result(Dialog::unavailable_results(hits));
             }
-            Event::Genres(r) => self.genres = Some(r),
             Event::Recommendations { pid, recs } => match &mut self.dialog {
                 Some(Dialog::Recommend(r)) if r.pid == pid && r.searching => r.append(recs),
                 _ => {
@@ -923,11 +919,8 @@ impl App {
                     ));
                 }
                 if ui.add_enabled(logged_in, egui::Button::new(tr.generate_playlists_dots)).clicked() {
-                    if !matches!(self.genres, Some(Ok(_))) {
-                        self.genres = None;
-                        self.worker.send(Cmd::LoadGenres);
-                    }
-                    self.open_dialog(Dialog::generate());
+                    let nb = std::ptr::eq(tr, &i18n::NB);
+                    self.open_dialog(Dialog::generate(nb));
                 }
                 if ui.add_enabled(logged_in && cur.is_some(), egui::Button::new(tr.recommend_songs_dots)).clicked()
                     && let Some(p) = &cur

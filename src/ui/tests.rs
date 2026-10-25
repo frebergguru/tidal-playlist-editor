@@ -219,13 +219,7 @@ fn screenshots() {
     h.run();
     {
         let app = h.state_mut();
-        let names = ["Pop", "Rock", "Jazz", "Hip-hop", "Classical", "Electronic", "Country", "Metal", "Blues", "Folk"];
-        app.genres = Some(Ok(names
-            .iter()
-            .enumerate()
-            .map(|(n, g)| crate::api::Genre { id: n.to_string(), name: (*g).into() })
-            .collect()));
-        app.open_dialog(super::Dialog::generate());
+        app.open_dialog(super::Dialog::generate(false));
     }
     h.run();
     h.get_by_label("Rock").click();
@@ -505,11 +499,7 @@ fn generate_dialog_needs_a_genre() {
     logged_in(&mut h);
     {
         let app = h.state_mut();
-        app.genres = Some(Ok(vec![
-            crate::api::Genre { id: "g1".into(), name: "Pop".into() },
-            crate::api::Genre { id: "g2".into(), name: "Jazz".into() },
-        ]));
-        app.open_dialog(super::Dialog::generate());
+        app.open_dialog(super::Dialog::generate(false));
     }
     h.run();
     assert!(h.get_by_label("Generate").accesskit_node().is_disabled(), "disabled until a genre is chosen");
@@ -521,8 +511,16 @@ fn generate_dialog_needs_a_genre() {
     h.get_by_label("One playlist per genre").click();
     h.run();
     h.get_by_label("Songs per playlist");
+    // A typed genre is added to the list and ticked.
+    h.get_by_role_and_label(Role::TextInput, "Other genre (type any genre, mood or style)").focus();
+    h.run();
+    h.event(egui::Event::Text("Bossa nova".into()));
+    h.run();
+    h.get_by_label("Add genre").click();
+    h.run();
+    h.get_by_label("Genres (3 chosen)");
     h.get_by_label("Generate").click();
     h.run();
     assert!(h.state().dialog.is_none());
-    wait_for_log(&mut h, "Generating playlists: Pop, Jazz");
+    wait_for_log(&mut h, "Generating playlists: Pop, Jazz, Bossa nova");
 }

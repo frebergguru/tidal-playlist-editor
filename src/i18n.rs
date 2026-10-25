@@ -184,12 +184,11 @@ strings! {
     finding_recommendations => "Finding recommendations", "Finner anbefalinger";
     generate_playlists_dots => "Generate playlists…", "Lag spillelister …";
     generate_playlists => "Generate playlists", "Lag spillelister";
-    generate_explain => "Pick one or more genres and how many songs you want. The app finds songs on TIDAL and makes new playlists. Nothing is changed in your other playlists.", "Velg én eller flere sjangre og hvor mange sanger du vil ha. Programmet finner sanger i TIDAL og lager nye spillelister. Ingenting endres i de andre spillelistene dine.";
-    loading_genres => "Loading genres…", "Laster sjangre …";
-    genres_failed => "Could not load the genres", "Kunne ikke laste sjangrene";
-    try_again => "Try again", "Prøv igjen";
+    generate_explain => "Tick one or more genres, or type your own, and choose how many songs you want. The app searches TIDAL's playlists for each genre and makes new playlists. Nothing is changed in your other playlists.", "Kryss av for én eller flere sjangre, eller skriv inn din egen, og velg hvor mange sanger du vil ha. Programmet søker i TIDALs spillelister etter hver sjanger og lager nye spillelister. Ingenting endres i de andre spillelistene dine.";
     genres_picked_n => "Genres ({0} chosen)", "Sjangre ({0} valgt)";
     filter_genres => "Filter genres", "Filtrer sjangre";
+    other_genre => "Other genre (type any genre, mood or style)", "Annen sjanger (skriv en hvilken som helst sjanger, stemning eller stil)";
+    add_genre => "Add genre", "Legg til sjanger";
     number_of_songs => "Number of songs", "Antall sanger";
     songs_per_playlist => "Songs per playlist", "Sanger per spilleliste";
     one_mixed_playlist => "One playlist with all the genres", "Én spilleliste med alle sjangrene";
