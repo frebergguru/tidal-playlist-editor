@@ -54,6 +54,8 @@ pub struct Config {
     pub export_dir: Option<PathBuf>,
     pub show_search: bool,
     pub strict_availability: bool,
+    /// Unavailable-songs scan also asks for playback (finds GEO_RESTRICTED).
+    pub geo_check: bool,
 }
 
 impl Default for Config {
@@ -72,6 +74,7 @@ impl Default for Config {
             export_dir: None,
             show_search: true,
             strict_availability: false,
+            geo_check: false,
         }
     }
 }

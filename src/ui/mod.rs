@@ -500,6 +500,7 @@ impl App {
                 self.preview_status = None;
                 let text = match f {
                     PreviewFail::Drm => tr.preview_drm.to_owned(),
+                    PreviewFail::GeoRestricted => tr.preview_geo.to_owned(),
                     PreviewFail::Video => tr.preview_video.to_owned(),
                     PreviewFail::Other(e) => format!("{}: {e}", tr.preview_failed),
                 };
@@ -695,7 +696,11 @@ impl App {
             });
             ui.menu_button(tr.menu_tools, |ui| {
                 if ui.add_enabled(logged_in, egui::Button::new(tr.find_unavailable_dots)).clicked() {
-                    self.open_dialog(Dialog::unavailable_setup(self.current.clone(), self.cfg.strict_availability));
+                    self.open_dialog(Dialog::unavailable_setup(
+                        self.current.clone(),
+                        self.cfg.strict_availability,
+                        self.cfg.geo_check,
+                    ));
                 }
                 if ui.add_enabled(cur.is_some(), egui::Button::new(tr.find_duplicates_dots)).clicked()
                     && let Some(p) = &cur

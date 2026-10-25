@@ -22,6 +22,7 @@ pub struct UnavailableDialog {
     pub setup: bool,
     pub all: bool,
     pub strict: bool,
+    pub geo: bool,
     pub current: Option<String>,
     pub hits: Vec<UnavailableHit>,
     pub remove: Vec<bool>,
@@ -149,11 +150,12 @@ impl Dialog {
     pub fn export(selected: HashSet<String>) -> Self {
         Dialog::Export { selected, format: ExportFormat::Json }
     }
-    pub fn unavailable_setup(current: Option<String>, strict: bool) -> Self {
+    pub fn unavailable_setup(current: Option<String>, strict: bool, geo: bool) -> Self {
         Dialog::Unavailable(Box::new(UnavailableDialog {
             setup: true,
             all: current.is_none(),
             strict,
+            geo,
             current,
             hits: Vec::new(),
             remove: Vec::new(),
@@ -168,6 +170,7 @@ impl Dialog {
             setup: false,
             all: false,
             strict: false,
+            geo: false,
             current: None,
             remove: vec![true; n],
             hits,
@@ -744,6 +747,7 @@ fn reason_text(tr: &Tr, r: &Reason) -> &'static str {
         Reason::Missing => tr.reason_missing,
         Reason::NotStreamable => tr.reason_not_streamable,
         Reason::NoUsageRule => tr.reason_no_rule,
+        Reason::GeoRestricted => tr.reason_geo,
     }
 }
 
@@ -761,6 +765,7 @@ fn unavailable(app: &mut App, ctx: &egui::Context, u: &mut UnavailableDialog, fi
             }
             ui.radio_value(&mut u.all, true, i18n::fmt(tr.all_my_playlists, &[&app.playlists.len().to_string()]));
             ui.checkbox(&mut u.strict, tr.strict_check);
+            ui.checkbox(&mut u.geo, tr.geo_check);
             ok_cancel(ui, tr, tr.start_scan, true)
         });
         if ok {
@@ -770,9 +775,10 @@ fn unavailable(app: &mut App, ctx: &egui::Context, u: &mut UnavailableDialog, fi
                 app.playlists.iter().filter(|p| Some(&p.id) == u.current.as_ref()).cloned().collect()
             };
             app.cfg.strict_availability = u.strict;
+            app.cfg.geo_check = u.geo;
             app.save_cfg();
             let job = app.start_job(tr.scanning, JobKind::Scan);
-            app.worker.send(Cmd::ScanUnavailable { playlists: pls, strict: u.strict, job });
+            app.worker.send(Cmd::ScanUnavailable { playlists: pls, strict: u.strict, geo: u.geo, job });
         }
         return if ok || cancel || esc { Outcome::Close } else { Outcome::Keep };
     }

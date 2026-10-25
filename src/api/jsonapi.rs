@@ -166,6 +166,12 @@ pub fn playlist_items_from(doc: &Doc) -> Vec<PlaylistItem> {
         .collect()
 }
 
+/// The first error's `code` in a JSON:API error body.
+pub fn error_code(body: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(body).ok()?;
+    str_of(v.get("errors")?.get(0)?, "code")
+}
+
 /// Extracts a readable message from a JSON:API error body.
 pub fn error_detail(body: &str) -> String {
     serde_json::from_str::<Value>(body)
@@ -224,5 +230,7 @@ mod tests {
         let body = r#"{"errors":[{"status":"400","code":"INVALID_INCLUDE","detail":"bad include"}]}"#;
         assert_eq!(error_detail(body), "bad include (INVALID_INCLUDE)");
         assert_eq!(error_detail("plain"), "plain");
+        assert_eq!(error_code(body).as_deref(), Some("INVALID_INCLUDE"));
+        assert_eq!(error_code("plain"), None);
     }
 }

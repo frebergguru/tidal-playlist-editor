@@ -9,7 +9,7 @@ pub use models::*;
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     #[error("HTTP {status}: {detail}")]
-    Http { status: u16, detail: String },
+    Http { status: u16, detail: String, code: Option<String> },
     #[error("network: {0}")]
     Network(#[from] reqwest::Error),
     #[error("login: {0}")]
@@ -26,6 +26,14 @@ impl ApiError {
     pub fn status(&self) -> Option<u16> {
         match self {
             ApiError::Http { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+
+    /// The JSON:API error `code`, e.g. `GEO_RESTRICTED`.
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            ApiError::Http { code, .. } => code.as_deref(),
             _ => None,
         }
     }

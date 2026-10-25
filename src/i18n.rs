@@ -215,6 +215,8 @@ strings! {
     audio_error => "Sound problem", "Lydproblem";
     loading_preview => "Loading preview: {0}", "Laster smakebit: {0}";
     preview_drm => "This track is copy protected (DRM) for this app. Use «Open in TIDAL» to hear it.", "Sporet er kopibeskyttet (DRM) for denne appen. Bruk «Åpne i TIDAL» for å høre det.";
+    preview_geo => "This song cannot be played in your location (GEO_RESTRICTED). Tools → Find unavailable songs, with the playback check, finds all such songs.",
+        "Sangen kan ikke spilles der du er (GEO_RESTRICTED). Verktøy → Finn utilgjengelige sanger, med avspillingssjekken, finner alle slike sanger.";
     preview_video => "Videos cannot be played here. Use «Open in TIDAL».", "Videoer kan ikke spilles av her. Bruk «Åpne i TIDAL».";
     preview_failed => "Could not play preview", "Kunne ikke spille smakebit";
     ready => "Ready.", "Klar.";
@@ -278,6 +280,9 @@ strings! {
     replacing_n => "Replacing {0}", "Erstatter {0}";
     reason_missing => "not offered by TIDAL any more", "tilbys ikke lenger av TIDAL";
     reason_not_streamable => "cannot be streamed", "kan ikke strømmes";
+    geo_check => "Also check playback in your location — finds «Content is unavailable in your location (GEO_RESTRICTED)». Slow: one request per song.",
+        "Sjekk også avspilling der du er — finner «Content is unavailable in your location (GEO_RESTRICTED)». Tregt: én forespørsel per sang.";
+    reason_geo => "not playable in your location (GEO_RESTRICTED)", "kan ikke spilles der du er (GEO_RESTRICTED)";
     reason_no_rule => "no streaming rights in your country", "ingen strømmerettigheter i landet ditt";
 
     compare_by => "Count as duplicates:", "Regn som duplikater:";

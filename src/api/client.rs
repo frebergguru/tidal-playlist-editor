@@ -152,7 +152,11 @@ impl Client {
             }
             let text = resp.text().await?;
             if !status.is_success() {
-                return Err(ApiError::Http { status: status.as_u16(), detail: jsonapi::error_detail(&text) });
+                return Err(ApiError::Http {
+                    status: status.as_u16(),
+                    detail: jsonapi::error_detail(&text),
+                    code: jsonapi::error_code(&text),
+                });
             }
             if text.trim().is_empty() {
                 return Ok(Value::Null);
@@ -592,6 +596,17 @@ impl Client {
 
     // ------------------------------------------------------------- playback
 
+    /// Asks TIDAL whether this track may be played here. `Ok(None)` = playable;
+    /// `Ok(Some(code))` = refused with a 403/404 code such as `GEO_RESTRICTED`.
+    pub async fn playback_restriction(&self, track_id: &str) -> Result<Option<String>> {
+        match self.track_manifest(track_id).await {
+            Ok(_) => Ok(None),
+            Err(e) if e.status() == Some(404) => Ok(Some(e.code().unwrap_or("NOT_FOUND").to_owned())),
+            Err(e) if e.status() == Some(403) => Ok(Some(e.code().unwrap_or("FORBIDDEN").to_owned())),
+            Err(e) => Err(e),
+        }
+    }
+
     pub async fn track_manifest(&self, track_id: &str) -> Result<Manifest> {
         let mut query =
             q(&[("adaptive", "false"), ("manifestType", "MPEG_DASH"), ("uriScheme", "DATA"), ("usage", "PLAYBACK")]);
@@ -611,7 +626,7 @@ impl Client {
         let resp = self.http.get(url).send().await?;
         let status = resp.status();
         if !status.is_success() {
-            return Err(ApiError::Http { status: status.as_u16(), detail: format!("download {url}") });
+            return Err(ApiError::Http { status: status.as_u16(), detail: format!("download {url}"), code: None });
         }
         Ok(resp.bytes().await?.to_vec())
     }
@@ -673,13 +688,13 @@ mod tests {
     }
 
     fn page(ids: &[&str], next: Option<&str>) -> serde_json::Value {
-        let data: Vec<Value> = ids
-            .iter()
-            .map(|id| json!({"id": id, "type": "tracks", "meta": {"itemId": format!("occ-{id}")}}))
-            .collect();
+        let data: Vec<Value> =
+            ids.iter().map(|id| json!({"id": id, "type": "tracks", "meta": {"itemId": format!("occ-{id}")}})).collect();
         let included: Vec<Value> = ids
             .iter()
-            .map(|id| json!({"id": id, "type": "tracks", "attributes": {"title": format!("T{id}"), "duration": "PT1M"}}))
+            .map(
+                |id| json!({"id": id, "type": "tracks", "attributes": {"title": format!("T{id}"), "duration": "PT1M"}}),
+            )
             .collect();
         let mut links = json!({"self": "/x"});
         if let Some(n) = next {
@@ -705,10 +720,10 @@ mod tests {
             .and(path("/v2/playlists/p/relationships/items"))
             .and(header("Authorization", "Bearer old"))
             .and(header("Accept", "application/vnd.api+json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(page(
-                &["1", "2"],
-                Some("/v2/playlists/p/relationships/items?page[cursor]=c2"),
-            )))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(page(&["1", "2"], Some("/v2/playlists/p/relationships/items?page[cursor]=c2"))),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -849,5 +864,45 @@ mod tests {
         // Cancelling stops before the next batch.
         let r = c.add_items("p", &refs, None, false, &|_| {}, &|| true).await;
         assert!(matches!(r, Err(ApiError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn playback_restriction_reads_error_codes() {
+        let server = MockServer::start().await;
+        let forbidden = |code: &str| {
+            ResponseTemplate::new(403).set_body_json(json!({"errors": [{"status": "403", "code": code,
+                "detail": "Content is unavailable in your location"}]}))
+        };
+        Mock::given(method("GET"))
+            .and(path("/v2/trackManifests/geo"))
+            .respond_with(forbidden("GEO_RESTRICTED"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/trackManifests/app"))
+            .respond_with(forbidden("CLIENT_NOT_ENTITLED"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/trackManifests/ok"))
+            .and(query_param("usage", "PLAYBACK"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"data": {"id": "ok", "type": "trackManifests",
+                "attributes": {"uri": "data:application/dash+xml;base64,PE1QRC8+", "trackPresentation": "PREVIEW"}}})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/trackManifests/flaky"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        let c = client(&server, far());
+        assert_eq!(c.playback_restriction("geo").await.unwrap().as_deref(), Some("GEO_RESTRICTED"));
+        assert_eq!(c.playback_restriction("app").await.unwrap().as_deref(), Some("CLIENT_NOT_ENTITLED"));
+        assert_eq!(c.playback_restriction("ok").await.unwrap(), None);
+        assert!(c.playback_restriction("flaky").await.is_err(), "other errors are reported, not hidden");
+        let e = c.track_manifest("geo").await.unwrap_err();
+        assert_eq!(e.code(), Some("GEO_RESTRICTED"));
     }
 }

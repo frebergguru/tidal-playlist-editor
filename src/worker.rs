@@ -42,6 +42,8 @@ pub enum Reason {
     NotStreamable,
     /// Strict check: no usage rule allows streaming in the user's country.
     NoUsageRule,
+    /// Playback check: TIDAL refuses playback here (`GEO_RESTRICTED`).
+    GeoRestricted,
 }
 
 #[derive(Clone, Debug)]
@@ -74,7 +76,7 @@ pub enum Cmd {
     SearchMore(String),
     AlbumTracks(Album),
     ArtistDetails(Artist),
-    ScanUnavailable { playlists: Vec<Playlist>, strict: bool, job: Job },
+    ScanUnavailable { playlists: Vec<Playlist>, strict: bool, geo: bool, job: Job },
     FindReplacements { hits: Vec<UnavailableHit>, job: Job },
     Replace { pid: String, swaps: Vec<(PlaylistItem, Track)>, job: Job },
     Match { playlists: Vec<ImportPlaylist>, job: Job },
@@ -101,6 +103,7 @@ pub enum Note {
 #[derive(Clone, Debug)]
 pub enum PreviewFail {
     Drm,
+    GeoRestricted,
     Video,
     Other(String),
 }
@@ -427,7 +430,7 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
             reload(ctx, &p.id).await;
             Ok(Some(Note::Merged { name, n: refs.len() }))
         }
-        Cmd::ScanUnavailable { playlists, strict, .. } => {
+        Cmd::ScanUnavailable { playlists, strict, geo, .. } => {
             let mut hits = Vec::new();
             let total = playlists.len();
             for (n, p) in playlists.iter().enumerate() {
@@ -445,6 +448,17 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
                         .collect();
                     bad_rules = c.not_streamable(&ids, &cancel).await?;
                 }
+                let mut geo_blocked = std::collections::HashSet::new();
+                if geo {
+                    let ids: Vec<String> = items
+                        .iter()
+                        .filter(|i| {
+                            i.r.kind == crate::api::ItemKind::Track && i.available() && !bad_rules.contains(&i.r.id)
+                        })
+                        .map(|i| i.r.id.clone())
+                        .collect();
+                    geo_blocked = geo_check(ctx, &c, ids, job).await?;
+                }
                 for it in items {
                     let reason = if it.track.is_none() {
                         Some(Reason::Missing)
@@ -452,6 +466,8 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
                         Some(Reason::NotStreamable)
                     } else if bad_rules.contains(&it.r.id) {
                         Some(Reason::NoUsageRule)
+                    } else if geo_blocked.contains(&it.r.id) {
+                        Some(Reason::GeoRestricted)
                     } else {
                         None
                     };
@@ -543,6 +559,57 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
         }
         _ => Ok(None),
     }
+}
+
+/// Codes that describe this app's access, not the track. If every answer is one
+/// of these, the check cannot tell anything and is stopped with an explanation.
+const APP_LEVEL_CODES: [&str; 4] = ["CLIENT_NOT_ENTITLED", "PREREQUISITE_MISSING", "CONCURRENT_PLAYBACK", "FORBIDDEN"];
+
+/// Playback check: asks TIDAL for each track's playback manifest (4 at a time)
+/// and returns the ids refused with `GEO_RESTRICTED`.
+async fn geo_check(
+    ctx: &Ctx,
+    c: &Arc<Client>,
+    ids: Vec<String>,
+    job: &Job,
+) -> Result<std::collections::HashSet<String>, ApiError> {
+    let total = ids.len();
+    let mut blocked = std::collections::HashSet::new();
+    let (mut done, mut app_level) = (0usize, 0usize);
+    let mut last_app_code = String::new();
+    let mut pending = ids.into_iter();
+    let mut set = tokio::task::JoinSet::new();
+    loop {
+        while set.len() < 4 && !job.cancelled() {
+            let Some(id) = pending.next() else { break };
+            let c = c.clone();
+            set.spawn(async move { (c.playback_restriction(&id).await, id) });
+        }
+        let Some(res) = set.join_next().await else { break };
+        let (r, id) = res.map_err(|e| ApiError::Other(e.to_string()))?;
+        match r? {
+            Some(code) if code == "GEO_RESTRICTED" => {
+                blocked.insert(id);
+            }
+            Some(code) if APP_LEVEL_CODES.contains(&code.as_str()) => {
+                app_level += 1;
+                last_app_code = code;
+            }
+            _ => {}
+        }
+        done += 1;
+        ctx.emit(Event::Progress { job: job.id, done, total });
+        if done >= 5 && app_level == done {
+            set.abort_all();
+            return Err(ApiError::Other(format!(
+                "TIDAL does not let this app check playback ({last_app_code}). Run the scan without the playback check."
+            )));
+        }
+    }
+    if job.cancelled() {
+        return Err(ApiError::Cancelled);
+    }
+    Ok(blocked)
 }
 
 async fn find_replacement(c: &Client, known: &Track) -> Option<Track> {
@@ -680,6 +747,7 @@ async fn preview(ctx: &Ctx, track: Track) {
             });
         }
         Ok(Err(f)) => ctx.emit(Event::PreviewFailed(f)),
+        Err(e) if e.code() == Some("GEO_RESTRICTED") => ctx.emit(Event::PreviewFailed(PreviewFail::GeoRestricted)),
         Err(e) => ctx.emit(Event::PreviewFailed(PreviewFail::Other(err_text(&e)))),
     }
 }
