@@ -162,6 +162,12 @@ pub enum Cmd {
         ids: Vec<String>,
         add: bool,
     },
+    /// The audio track of each video (item id, video metadata), reported as
+    /// [`Event::MusicVersions`].
+    FindMusic {
+        videos: Vec<(String, Track)>,
+        job: Job,
+    },
     /// Every video in `playlists`, reported as [`Event::Videos`].
     FindVideos {
         playlists: Vec<Playlist>,
@@ -314,6 +320,8 @@ pub enum Event {
         error: String,
     },
     Unavailable(Vec<UnavailableHit>),
+    /// (video item id, its audio track if found).
+    MusicVersions(Vec<(String, Option<Track>)>),
     /// (playlist, video) pairs, in playlist order.
     Videos(Vec<(Playlist, PlaylistItem)>),
     Recommendations {
@@ -630,6 +638,7 @@ async fn run_job(ctx: &Ctx, cmd: Cmd) {
         | Cmd::FindReplacements { job, .. }
         | Cmd::Recommend { job, .. }
         | Cmd::FindVideos { job, .. }
+        | Cmd::FindMusic { job, .. }
         | Cmd::Generate { job, .. }
         | Cmd::Replace { job, .. }
         | Cmd::Match { job, .. }
@@ -874,6 +883,19 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
             ctx.emit(Event::Unavailable(hits));
             Ok(None)
         }
+        Cmd::FindMusic { videos, .. } => {
+            let total = videos.len();
+            let mut out = Vec::with_capacity(total);
+            for (n, (id, v)) in videos.into_iter().enumerate() {
+                if cancel() {
+                    return Err(ApiError::Cancelled);
+                }
+                out.push((id, find_replacement(&c, &v, true).await));
+                ctx.emit(Event::Progress { job: job.id, done: n + 1, total });
+            }
+            ctx.emit(Event::MusicVersions(out));
+            Ok(None)
+        }
         Cmd::FindVideos { playlists, .. } => {
             let mut found = Vec::new();
             let total = playlists.len();
@@ -966,7 +988,7 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
                     return Err(ApiError::Cancelled);
                 }
                 let found = match &h.known {
-                    Some(k) => find_replacement(&c, k).await,
+                    Some(k) => find_replacement(&c, k, false).await,
                     None => None,
                 };
                 list.push((h, found));
@@ -1156,18 +1178,23 @@ async fn geo_check(
     Ok(blocked)
 }
 
-async fn find_replacement(c: &Client, known: &Track) -> Option<Track> {
+/// The same song as `known`, playable: by ISRC first, then by search.
+/// With `from_video`, `known` is a music video and the answer is its audio track:
+/// the title is cleaned of video words, and ISRC, album and length are ignored
+/// (a video has its own ISRC, and is often longer than the song).
+async fn find_replacement(c: &Client, known: &Track, from_video: bool) -> Option<Track> {
     let row = crate::ops::files::ImportRow {
-        kind: known.kind,
+        kind: if from_video { crate::api::ItemKind::Track } else { known.kind },
         id: None,
-        isrc: known.isrc.clone(),
-        title: known.title.clone(),
+        isrc: if from_video { None } else { known.isrc.clone() },
+        title: if from_video { matcher::music_title(&known.title) } else { known.title.clone() },
         artists: known.artists.clone(),
-        album: known.album.clone(),
-        duration_secs: (known.duration_secs > 0).then_some(known.duration_secs),
+        album: if from_video { None } else { known.album.clone() },
+        duration_secs: (known.duration_secs > 0 && !from_video).then_some(known.duration_secs),
     };
-    let usable = |t: &Track| t.id != known.id && t.streamable();
-    if let Some(isrc) = &known.isrc
+    let usable =
+        |t: &Track| t.id != known.id && t.streamable() && (!from_video || t.kind == crate::api::ItemKind::Track);
+    if let Some(isrc) = &row.isrc
         && let Ok(cands) = c.tracks_by_isrc(isrc).await
     {
         let mut cands: Vec<Track> = cands.into_iter().filter(usable).collect();
@@ -1182,7 +1209,9 @@ async fn find_replacement(c: &Client, known: &Track) -> Option<Track> {
         .filter(usable)
         .map(|t| (matcher::score(&row, &t), t))
         .filter(|(s, _)| *s >= 0.8)
-        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(s, t)| (s + matcher::tie_break(&row, &t), t))
+        // `min_by` with the order reversed keeps the first of equals: TIDAL's search order.
+        .min_by(|a, b| b.0.total_cmp(&a.0))
         .map(|(_, t)| t)
 }
 

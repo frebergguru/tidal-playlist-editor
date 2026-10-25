@@ -21,7 +21,7 @@ with your own TIDAL account through your own developer app.
   - scan one or all playlists for songs TIDAL no longer offers in your country, with an optional thorough check of streaming rights;
   - remove them, or replace them with the same recording (ISRC) or the best search match.
   - The app remembers song names locally, so songs that later disappear can still be identified.
-- **Videos:** videos are marked "🎬 Video" in the song list, and Tools → "Find videos…" lists every video in one or all playlists, with "Open in TIDAL" and the option to remove them.
+- **Videos:** videos are marked "🎬 Video" in the song list, and Tools → "Find videos…" lists every video in one or all playlists, with "Open in TIDAL". "Find music versions" looks up each video's song on TIDAL; you check the suggestions (with a preview), and the ticked videos are replaced by their song in the same place, or removed.
 - **Duplicates:** find songs with the same TIDAL id, the same recording (ISRC), or the same artist and title.
 - **Export:** JSON (full detail), CSV, M3U8 and XSPF, for one, several or all playlists.
 - **Backup and restore:** "Back up all playlists" writes a timestamped folder. A restore compares a backup with the current playlist, shows what differs, and puts the songs and their order back.
@@ -138,7 +138,7 @@ TIDAL-konto via din egen utviklerapp.
   - søk gjennom én eller alle spillelister etter sanger TIDAL ikke lenger tilbyr i landet ditt, med valgfri grundig sjekk av strømmerettigheter;
   - fjern dem, eller erstatt dem med samme innspilling (ISRC) eller beste søketreff.
   - Programmet husker sangnavn lokalt, slik at sanger som forsvinner senere, fortsatt kan kjennes igjen.
-- **Videoer:** videoer er merket «🎬 Video» i sanglisten, og Verktøy → «Finn videoer …» viser alle videoene i én eller alle spillelister, med «Åpne i TIDAL» og mulighet til å fjerne dem.
+- **Videoer:** videoer er merket «🎬 Video» i sanglisten, og Verktøy → «Finn videoer …» viser alle videoene i én eller alle spillelister, med «Åpne i TIDAL». «Finn musikkversjoner» slår opp sangen til hver video i TIDAL; du sjekker forslagene (med smakebit), og de avkryssede videoene byttes ut med sangen på samme plass, eller fjernes.
 - **Duplikater:** finn sanger med samme TIDAL-id, samme innspilling (ISRC) eller samme artist og tittel.
 - **Eksport:** JSON (alle detaljer), CSV, M3U8 og XSPF, for én, flere eller alle spillelister.
 - **Sikkerhetskopi og gjenoppretting:** «Sikkerhetskopier alle spillelister» lager en mappe med tidsstempel. Ved gjenoppretting sammenlignes sikkerhetskopien med spillelisten slik den er nå, du ser hva som er forskjellig, og sangene og rekkefølgen settes tilbake.

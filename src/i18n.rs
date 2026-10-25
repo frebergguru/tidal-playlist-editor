@@ -178,9 +178,11 @@ strings! {
     videos_in_playlists => "Videos in playlists", "Videoer i spillelister";
     no_videos => "No videos were found.", "Fant ingen videoer.";
     found_n_videos => "Found {0} video(s) in {1} playlist(s).", "Fant {0} video(er) i {1} spilleliste(r).";
-    videos_tick_to_remove => "Tick the videos you want to remove from their playlist.", "Kryss av for videoene du vil fjerne fra spillelisten.";
+    videos_tick_to_change => "Tick the videos you want to change. «Find music versions» looks for each video's song; a ticked video is then replaced by its song in the same place, or removed if you untick the song.", "Kryss av for videoene du vil endre. «Finn musikkversjoner» leter etter sangen til hver video; en avkrysset video byttes da ut med sangen på samme plass, eller fjernes hvis du fjerner krysset for sangen.";
+    find_music_versions => "Find music versions", "Finn musikkversjoner";
+    no_music_version => "No music version found.", "Fant ingen musikkversjon.";
+    replace_n_remove_m => "Replace {0}, remove {1}", "Erstatt {0}, fjern {1}";
     not_yours => "not yours, cannot be changed", "ikke din, kan ikke endres";
-    remove_n_videos => "Remove {0} video(s)", "Fjern {0} video(er)";
     video => "Video", "Video";
     recommend_songs_dots => "Recommend songs…", "Anbefal sanger …";
     similar_songs_dots => "Similar songs…", "Lignende sanger …";

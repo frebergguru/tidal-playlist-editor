@@ -605,9 +605,49 @@ fn videos_are_marked_and_listed() {
     h.get_by_label("Open in TIDAL: Live clip — Artist");
     h.get_by_role_and_label(Role::CheckBox, "Live clip — Artist").click();
     h.run();
-    h.get_by_label("Remove 1 video(s)").click();
+    h.get_by_label("Replace 0, remove 1").click();
     h.run();
     assert!(h.state().dialog.is_none());
     assert!(!h.state().items["p1"].iter().any(|i| i.item_id == "occ9"), "video removed");
+    assert_eq!(h.state().undo["p1"].len(), 1, "undoable");
+}
+
+#[test]
+fn videos_can_be_swapped_for_their_song() {
+    let mut h = harness();
+    logged_in(&mut h);
+    let video = |n: usize, title: &str| {
+        let mut v = item(n, title, true);
+        v.r.kind = ItemKind::Video;
+        v
+    };
+    let (clip, other) = (video(8, "Hit song (Official Video)"), video(9, "Rare clip"));
+    {
+        let app = h.state_mut();
+        app.items.get_mut("p1").unwrap().extend([clip.clone(), other.clone()]);
+        let p = app.playlists[0].clone();
+        app.open_dialog(super::Dialog::videos_results(vec![(p.clone(), clip), (p, other)]));
+    }
+    h.run();
+    h.get_by_label("Find music versions").click();
+    h.run();
+    // Not logged in here, so the search job fails (and «Searching…» clears);
+    // give the dialog the worker's answer directly.
+    let song =
+        Track { id: "500".into(), title: "Hit song".into(), artists: vec!["Artist".into()], ..Default::default() };
+    match &mut h.state_mut().dialog {
+        Some(super::Dialog::Videos(v)) => {
+            v.set_music(vec![("occ8".into(), Some(song)), ("occ9".into(), None)]);
+        }
+        _ => panic!("videos dialog should stay open"),
+    }
+    h.run();
+    h.get_by_label("Play preview: Hit song — Artist");
+    h.get_by_label("No music version found.");
+    // The video with a song is ticked to be replaced; the other is left alone.
+    h.get_by_label("Replace 1, remove 0").click();
+    h.run();
+    assert!(h.state().dialog.is_none());
+    wait_for_log(&mut h, "Replacing 1");
     assert_eq!(h.state().undo["p1"].len(), 1, "undoable");
 }

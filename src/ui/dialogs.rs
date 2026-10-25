@@ -75,7 +75,29 @@ pub struct VideosDialog {
     pub current: Option<String>,
     /// (playlist, video), in playlist order.
     pub hits: Vec<(Playlist, PlaylistItem)>,
+    /// Ticked: change this video (replace it with `music`, or remove it).
     pub remove: Vec<bool>,
+    /// The audio track for each hit, once «Find music versions» has run.
+    pub music: Option<Vec<Option<Track>>>,
+    pub use_music: Vec<bool>,
+    pub searching: bool,
+}
+
+impl VideosDialog {
+    /// Takes the search result; a video with a music version is ticked to be replaced.
+    pub fn set_music(&mut self, found: Vec<(String, Option<Track>)>) {
+        self.searching = false;
+        let by_id: HashMap<String, Option<Track>> = found.into_iter().collect();
+        let music: Vec<Option<Track>> =
+            self.hits.iter().map(|(_, it)| by_id.get(&it.item_id).cloned().flatten()).collect();
+        for (n, (p, _)) in self.hits.iter().enumerate() {
+            if music[n].is_some() && p.owned {
+                self.remove[n] = true;
+            }
+        }
+        self.use_music = music.iter().map(Option::is_some).collect();
+        self.music = Some(music);
+    }
 }
 
 pub struct GenerateDialog {
@@ -269,11 +291,23 @@ impl Dialog {
             current,
             hits: Vec::new(),
             remove: Vec::new(),
+            music: None,
+            use_music: Vec::new(),
+            searching: false,
         }))
     }
     pub fn videos_results(hits: Vec<(Playlist, PlaylistItem)>) -> Self {
-        let remove = vec![false; hits.len()];
-        Dialog::Videos(Box::new(VideosDialog { setup: false, all: false, current: None, hits, remove }))
+        let n = hits.len();
+        Dialog::Videos(Box::new(VideosDialog {
+            setup: false,
+            all: false,
+            current: None,
+            hits,
+            remove: vec![false; n],
+            music: None,
+            use_music: vec![false; n],
+            searching: false,
+        }))
     }
     pub fn generate(norwegian: bool) -> Self {
         Dialog::Generate(Box::new(GenerateDialog {
@@ -1021,6 +1055,8 @@ fn videos(app: &mut App, ctx: &egui::Context, v: &mut VideosDialog, first: bool)
         return if ok || cancel || esc { Outcome::Close } else { Outcome::Keep };
     }
     let mut open = None;
+    let mut play = None;
+    let mut find = false;
     let (esc, (ok, cancel)) = frame(ctx, "videos", tr.videos_in_playlists, |ui| {
         if v.hits.is_empty() {
             ui.label(tr.no_videos);
@@ -1032,7 +1068,18 @@ fn videos(app: &mut App, ctx: &egui::Context, v: &mut VideosDialog, first: bool)
         }
         let lists = v.hits.iter().map(|(p, _)| p.id.as_str()).collect::<HashSet<_>>().len();
         ui.label(i18n::fmt(tr.found_n_videos, &[&v.hits.len().to_string(), &lists.to_string()]));
-        ui.label(tr.videos_tick_to_remove);
+        ui.label(tr.videos_tick_to_change);
+        ui.horizontal_wrapped(|ui| {
+            let f = ui.add_enabled(!v.searching, egui::Button::new(tr.find_music_versions));
+            if first {
+                f.request_focus();
+            }
+            find = f.clicked();
+            if v.searching {
+                super::style::busy(ui, app.reduced_motion);
+                ui.label(tr.searching);
+            }
+        });
         egui::ScrollArea::vertical().max_height(ui.available_height() - 80.0).show(ui, |ui| {
             let mut last = "";
             for (n, (p, it)) in v.hits.iter().enumerate() {
@@ -1049,30 +1096,87 @@ fn videos(app: &mut App, ctx: &egui::Context, v: &mut VideosDialog, first: bool)
                         b.widget_info(|| {
                             egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{}: {desc}", tr.open_in_tidal))
                         });
-                        if first && n == 0 {
-                            b.request_focus();
-                        }
                         if b.on_hover_text(tr.open_in_tidal).clicked() {
                             open = Some(Track { id: it.r.id.clone(), kind: it.r.kind, ..Default::default() });
                         }
                         ui.add_enabled(p.owned, egui::Checkbox::new(&mut v.remove[n], desc));
                     });
+                    match v.music.as_ref().map(|m| &m[n]) {
+                        Some(Some(song)) => {
+                            ui.indent("music", |ui| {
+                                ui.horizontal(|ui| {
+                                    let desc = track_desc(tr, Some(song), &song.id);
+                                    let pb = ui.button("▶");
+                                    pb.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::Role::Button,
+                                            true,
+                                            format!("{}: {desc}", tr.play_preview),
+                                        )
+                                    });
+                                    if pb.on_hover_text(tr.play_preview).clicked() {
+                                        play = Some(song.clone());
+                                    }
+                                    let mut text = format!("{} {desc}", tr.replace_with);
+                                    if let Some(a) = song.album.as_deref().filter(|a| !a.is_empty()) {
+                                        text.push_str(&format!(" ({a})"));
+                                    }
+                                    ui.add_enabled(p.owned, egui::Checkbox::new(&mut v.use_music[n], text));
+                                });
+                            });
+                        }
+                        Some(None) => {
+                            ui.indent("music", |ui| ui.label(RichText::new(tr.no_music_version).italics()));
+                        }
+                        None => {}
+                    }
                 });
             }
         });
-        let n = v.remove.iter().filter(|r| **r).count();
-        ok_cancel(ui, tr, &i18n::fmt(tr.remove_n_videos, &[&n.to_string()]), n > 0)
+        let ticked: Vec<usize> = (0..v.hits.len()).filter(|&n| v.remove[n]).collect();
+        let swaps =
+            ticked.iter().filter(|&&n| v.use_music[n] && v.music.as_ref().is_some_and(|m| m[n].is_some())).count();
+        let label = i18n::fmt(tr.replace_n_remove_m, &[&swaps.to_string(), &(ticked.len() - swaps).to_string()]);
+        ok_cancel(ui, tr, &label, !ticked.is_empty())
     });
     if let Some(t) = open {
         app.open_in_tidal(t.app_url(), t.web_url());
     }
+    if let Some(t) = play {
+        app.play(&t);
+    }
+    if find {
+        let videos: Vec<(String, Track)> =
+            v.hits.iter().filter_map(|(_, it)| app.track_meta(it).map(|t| (it.item_id.clone(), t))).collect();
+        v.searching = true;
+        let job = app.start_job(tr.find_music_versions, JobKind::Replacements);
+        app.worker.send(Cmd::FindMusic { videos, job });
+    }
     if ok {
-        let mut by_pid: HashMap<String, HashSet<String>> = HashMap::new();
-        for ((p, it), _) in v.hits.iter().zip(&v.remove).filter(|(_, r)| **r) {
-            by_pid.entry(p.id.clone()).or_default().insert(it.item_id.clone());
+        // Per playlist: (video → song swaps, plain removals).
+        type Plan = (Vec<(PlaylistItem, Track)>, HashSet<String>);
+        let mut by_pid: HashMap<String, Plan> = HashMap::new();
+        for (n, (p, it)) in v.hits.iter().enumerate() {
+            if !v.remove[n] || !p.owned {
+                continue;
+            }
+            let entry = by_pid.entry(p.id.clone()).or_default();
+            match v.music.as_ref().and_then(|m| m[n].clone()) {
+                Some(song) if v.use_music[n] => entry.0.push((it.clone(), song)),
+                _ => {
+                    entry.1.insert(it.item_id.clone());
+                }
+            }
         }
-        for (pid, ids) in &by_pid {
-            app.remove_from_playlist(pid, ids);
+        for (pid, (swaps, removes)) in by_pid {
+            if !removes.is_empty() {
+                app.remove_from_playlist(&pid, &removes);
+            }
+            if !swaps.is_empty() {
+                app.snapshot(&pid);
+                let job = app.start_job(i18n::fmt(tr.replacing_n, &[&swaps.len().to_string()]), JobKind::Plain);
+                app.worker.send(Cmd::Replace { pid, swaps, job });
+            }
         }
     }
     if ok || cancel || esc { Outcome::Close } else { Outcome::Keep }

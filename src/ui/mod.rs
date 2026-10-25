@@ -620,6 +620,14 @@ impl App {
                 {
                     r.searching = false;
                 }
+                // A failed or cancelled replacement search must not leave its dialog «Searching…».
+                if info.as_ref().is_some_and(|j| j.kind == JobKind::Replacements) {
+                    match &mut self.dialog {
+                        Some(Dialog::Videos(v)) => v.searching = false,
+                        Some(Dialog::Unavailable(u)) => u.searching = false,
+                        _ => {}
+                    }
+                }
                 let label = info.map(|j| j.label).unwrap_or_default();
                 if error == "cancelled" {
                     self.note(format!("{label}: {}", tr.cancelled));
@@ -640,6 +648,11 @@ impl App {
                 self.open_result(Dialog::unavailable_results(hits));
             }
             Event::Videos(hits) => self.open_result(Dialog::videos_results(hits)),
+            Event::MusicVersions(found) => {
+                if let Some(Dialog::Videos(v)) = &mut self.dialog {
+                    v.set_music(found);
+                }
+            }
             Event::Recommendations { pid, recs } => match &mut self.dialog {
                 Some(Dialog::Recommend(r)) if r.pid == pid && r.searching => r.append(recs),
                 _ => {

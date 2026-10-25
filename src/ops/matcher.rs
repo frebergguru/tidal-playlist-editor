@@ -85,6 +85,59 @@ pub fn normalise(s: &str) -> String {
     if out.is_empty() { lower.chars().filter(|c| c.is_alphanumeric()).collect() } else { out }
 }
 
+/// Words that mark a part of a title as describing the video, not the song.
+const VIDEO_WORDS: [&str; 10] =
+    ["video", "visualizer", "visualiser", "lyric", "lyrics", "official", "audio", "4k", "hd", "mv"];
+
+fn is_video_part(part: &str) -> bool {
+    part.to_lowercase().split(|c: char| !c.is_alphanumeric()).any(|w| VIDEO_WORDS.contains(&w))
+}
+
+/// The song's title in a music video's title: drops parts such as
+/// "(Official Video)", "[4K]", " - Official Music Video" or " | Lyric Video".
+/// "Live" and other version words are kept, so a live video finds a live recording.
+pub fn music_title(video_title: &str) -> String {
+    let mut out = String::with_capacity(video_title.len());
+    let mut rest = video_title;
+    // Bracketed parts that describe the video.
+    while let Some(open) = rest.find(['(', '[']) {
+        let close = if rest[open..].starts_with('(') { ')' } else { ']' };
+        let Some(len) = rest[open..].find(close) else { break };
+        let part = &rest[open..open + len + 1];
+        out.push_str(&rest[..open]);
+        if !is_video_part(part) {
+            out.push_str(part);
+        }
+        rest = &rest[open + len + 1..];
+    }
+    out.push_str(rest);
+    // A trailing " - …" or " | …" that describes the video.
+    for sep in [" | ", " - ", " – ", " — "] {
+        if let Some(i) = out.rfind(sep)
+            && is_video_part(&out[i + sep.len()..])
+        {
+            out.truncate(i);
+        }
+    }
+    let clean = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    if clean.is_empty() { video_title.trim().to_owned() } else { clean }
+}
+
+/// A small extra (under 0.1) for choosing between candidates that score alike,
+/// since [`score`] ignores bracketed parts and is satisfied by one shared artist:
+/// prefer the exact title (not a remix or live version of it), then the
+/// candidate that has more of the row's artists.
+pub fn tie_break(row: &ImportRow, t: &Track) -> f32 {
+    let exact = t.full_title().trim().eq_ignore_ascii_case(row.title.trim());
+    let shared = if row.artists.is_empty() {
+        0.0
+    } else {
+        let have = row.artists.iter().filter(|a| t.artists.iter().any(|b| normalise(a) == normalise(b))).count();
+        have as f32 / row.artists.len() as f32
+    };
+    0.05 * f32::from(u8::from(exact)) + 0.04 * shared
+}
+
 fn sim(a: &str, b: &str) -> f32 {
     let (a, b) = (normalise(a), normalise(b));
     if a.is_empty() || b.is_empty() {
@@ -261,6 +314,49 @@ mod tests {
 
     fn row(title: &str, artist: &str, dur: Option<u32>) -> ImportRow {
         ImportRow { title: title.into(), artists: vec![artist.into()], duration_secs: dur, ..Default::default() }
+    }
+
+    #[test]
+    fn tie_break_prefers_exact_title_and_all_artists() {
+        let row = ImportRow {
+            kind: crate::api::ItemKind::Track,
+            id: None,
+            isrc: None,
+            title: "It Ain't Me".into(),
+            artists: vec!["Kygo".into(), "Selena Gomez".into()],
+            album: None,
+            duration_secs: None,
+        };
+        let t = |title: &str, artists: &[&str]| Track {
+            title: title.into(),
+            artists: artists.iter().map(|a| (*a).into()).collect(),
+            ..Default::default()
+        };
+        let original = t("It Ain't Me", &["Kygo", "Selena Gomez"]);
+        let remix = t("It Ain't Me (Tiësto's AFTR:HRS Remix)", &["Kygo", "Selena Gomez"]);
+        let one_artist = t("It Ain't Me", &["Selena Gomez"]);
+        // The main score cannot tell them apart; the tie-break can.
+        assert_eq!(score(&row, &original), score(&row, &remix));
+        assert!(tie_break(&row, &original) > tie_break(&row, &remix));
+        assert!(tie_break(&row, &original) > tie_break(&row, &one_artist));
+    }
+
+    #[test]
+    fn music_title_drops_video_words_only() {
+        assert_eq!(music_title("Song (Official Video)"), "Song");
+        assert_eq!(music_title("Song [4K] (Remastered)"), "Song (Remastered)");
+        assert_eq!(music_title("Song - Official Music Video"), "Song");
+        assert_eq!(music_title("Song | Lyric Video"), "Song");
+        // Real TIDAL video titles.
+        assert_eq!(music_title("It Ain't Me (Official Audio)"), "It Ain't Me");
+        assert_eq!(
+            music_title("Say Say Say (feat. Paul McCartney & Michael Jackson) (Lyric Video)"),
+            "Say Say Say (feat. Paul McCartney & Michael Jackson)"
+        );
+        assert_eq!(music_title("Song (Live at Wembley)"), "Song (Live at Wembley)");
+        assert_eq!(music_title("Song - Radio Edit"), "Song - Radio Edit");
+        assert_eq!(music_title("Video Killed the Radio Star"), "Video Killed the Radio Star");
+        assert_eq!(music_title("(Official Video)"), "(Official Video)");
     }
 
     #[test]
