@@ -14,6 +14,12 @@ use super::ApiError;
 pub const AUTHORIZE_URL: &str = "https://login.tidal.com/authorize";
 pub const TOKEN_URL: &str = "https://auth.tidal.com/v1/oauth2/token";
 
+pub const SPOTIFY_AUTHORIZE_URL: &str = "https://accounts.spotify.com/authorize";
+pub const SPOTIFY_TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
+/// Minimum Spotify scopes: read own/collaborative playlists and Liked Songs,
+/// create playlists and add items to them.
+pub const SPOTIFY_SCOPES: &str = "playlist-read-private playlist-read-collaborative playlist-modify-private playlist-modify-public user-library-read";
+
 /// Third-party scopes this app uses (see `components.securitySchemes` in the spec).
 pub const SCOPES: &str =
     "user.read collection.read collection.write playlists.read playlists.write search.read playback";
@@ -26,6 +32,7 @@ pub struct AuthConfig {
     pub redirect_uri: String,
     pub authorize_url: String,
     pub token_url: String,
+    pub scopes: String,
 }
 
 impl AuthConfig {
@@ -36,6 +43,19 @@ impl AuthConfig {
             redirect_uri: redirect_uri.trim().to_owned(),
             authorize_url: AUTHORIZE_URL.into(),
             token_url: TOKEN_URL.into(),
+            scopes: SCOPES.into(),
+        }
+    }
+
+    /// Spotify Web API: Authorization Code + PKCE, no client secret.
+    pub fn spotify(client_id: &str, redirect_uri: &str) -> Self {
+        Self {
+            client_id: client_id.trim().to_owned(),
+            client_secret: None,
+            redirect_uri: redirect_uri.trim().to_owned(),
+            authorize_url: SPOTIFY_AUTHORIZE_URL.into(),
+            token_url: SPOTIFY_TOKEN_URL.into(),
+            scopes: SPOTIFY_SCOPES.into(),
         }
     }
 }
@@ -85,7 +105,7 @@ pub fn authorize_url(cfg: &AuthConfig, pkce: &Pkce) -> String {
         .append_pair("response_type", "code")
         .append_pair("client_id", &cfg.client_id)
         .append_pair("redirect_uri", &cfg.redirect_uri)
-        .append_pair("scope", SCOPES)
+        .append_pair("scope", &cfg.scopes)
         .append_pair("code_challenge_method", "S256")
         .append_pair("code_challenge", &pkce.challenge)
         .append_pair("state", &pkce.state);

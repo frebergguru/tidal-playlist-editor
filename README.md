@@ -28,6 +28,10 @@ with your own TIDAL account through your own developer app.
   - you check every match before anything is written.
 - **Playback:** previews of about 30 seconds inside the app; "Open in TIDAL" for full tracks.
 - **Other:** add songs to My Collection, and statistics per playlist.
+- **Spotify ⇄ TIDAL:** copy playlists, including Liked Songs, from Spotify to TIDAL, or from TIDAL to Spotify.
+  - Songs are matched by ISRC first, then by artist and title.
+  - You review every match before anything is written.
+  - Local files, podcast episodes and videos cannot be copied, and the app tells you how many were skipped.
 
 ### Why previews and not full tracks?
 
@@ -46,6 +50,19 @@ Tracks with DRM cannot be played here and open in the TIDAL app instead.
 5. Start TIDAL Playlist Editor, open **API settings…**, paste the **Client ID** and save.
    A client secret is not needed (the app uses PKCE).
 6. Press **Log in with TIDAL** and log in in the browser. The app continues by itself; there is no time limit.
+
+## Spotify (optional)
+
+1. Go to the [Spotify developer dashboard](https://developer.spotify.com/dashboard) and create an app. Choose **Web API**.
+2. Add the redirect URI `http://127.0.0.1:8766/callback`. Spotify does not allow `localhost`; it must be `127.0.0.1`.
+3. In TIDAL Playlist Editor, open **Settings**, paste the **Spotify Client ID** and save. No client secret is needed (PKCE).
+4. Open the **Spotify** menu, choose **Connect Spotify account…** and log in in the browser.
+
+The app asks Spotify only for these scopes: `playlist-read-private`, `playlist-read-collaborative`,
+`playlist-modify-private`, `playlist-modify-public` and `user-library-read` (for Liked Songs).
+Spotify data is used only for the copy in progress and is not stored. The Spotify login is kept in
+`spotify-tokens.json` next to the TIDAL login, readable only by you.
+This project is not made by or affiliated with Spotify.
 
 ## Where your data is stored
 
@@ -121,6 +138,10 @@ TIDAL-konto via din egen utviklerapp.
   - du sjekker hvert treff før noe skrives.
 - **Avspilling:** smakebiter på omtrent 30 sekunder i programmet; «Åpne i TIDAL» for hele spor.
 - **Annet:** legg sanger i Min samling, og statistikk per spilleliste.
+- **Spotify ⇄ TIDAL:** kopier spillelister, også Likte sanger, fra Spotify til TIDAL eller fra TIDAL til Spotify.
+  - Sangene finnes via ISRC først, så artist og tittel.
+  - Du sjekker hvert treff før noe lagres.
+  - Lokale filer, podkastepisoder og videoer kan ikke kopieres, og programmet sier hvor mange som ble hoppet over.
 
 ### Hvorfor smakebiter og ikke hele spor?
 
@@ -137,6 +158,17 @@ høyere tilgangsnivå, spiller den samme koden hele sporet. Spor med DRM kan ikk
    `user.read collection.read collection.write playlists.read playlists.write search.read playback`.
 5. Start programmet, åpne **API-innstillinger …**, lim inn **Client ID** og lagre. Du trenger ikke klienthemmelighet.
 6. Trykk **Logg inn med TIDAL** og logg inn i nettleseren. Programmet fortsetter av seg selv; det er ingen tidsgrense.
+
+## Spotify (valgfritt)
+
+1. Gå til [Spotifys utviklerpanel](https://developer.spotify.com/dashboard) og lag en app. Velg **Web API**.
+2. Legg til omdirigerings-URI-en `http://127.0.0.1:8766/callback`. Spotify tillater ikke `localhost`; det må være `127.0.0.1`.
+3. I programmet: åpne **Innstillinger**, lim inn **Spotify Client ID** og lagre. Du trenger ikke klienthemmelighet.
+4. Åpne **Spotify**-menyen, velg **Koble til Spotify-konto …** og logg inn i nettleseren.
+
+Programmet ber bare om tilgangene `playlist-read-private`, `playlist-read-collaborative`, `playlist-modify-private`,
+`playlist-modify-public` og `user-library-read` (for Likte sanger). Data fra Spotify brukes bare til kopieringen som pågår,
+og lagres ikke. Prosjektet er ikke laget av eller tilknyttet Spotify.
 
 ## Hvor dataene lagres
 

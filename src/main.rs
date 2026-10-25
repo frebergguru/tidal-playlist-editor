@@ -4,6 +4,7 @@ mod api;
 mod i18n;
 mod ops;
 mod player;
+mod spotify;
 mod store;
 mod ui;
 mod worker;

@@ -268,3 +268,123 @@ fn removes_all_geo_restricted_at_once() {
     assert!(h.query_by_label_contains("Remove all GEO_RESTRICTED").is_none());
     assert_eq!(h.state().undo["p1"].len(), 1, "undoable");
 }
+
+/// Runs frames until a log line starting with `prefix` appears (worker events are async).
+fn wait_for_log(h: &mut Harness<'static, App>, prefix: &str) {
+    for _ in 0..200 {
+        h.run();
+        if h.state().log.iter().any(|l| l.text.starts_with(prefix)) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!(
+        "no log line starting with {prefix:?}; log: {:?}",
+        h.state().log.iter().map(|l| &l.text).collect::<Vec<_>>()
+    );
+}
+
+fn connect_spotify(h: &mut Harness<'static, App>) {
+    let app = h.state_mut();
+    app.cfg.spotify_client_id = "sp-client".into();
+    app.spotify = super::SpState::On(crate::spotify::SpUser { id: "me".into(), display_name: "Tester".into() });
+    app.sp_playlists = vec![
+        crate::spotify::SpPlaylist { name: "Liked Songs".into(), ..Default::default() },
+        crate::spotify::SpPlaylist {
+            id: "s1".into(),
+            name: "Summer".into(),
+            owner_id: "me".into(),
+            total: Some(12),
+            ..Default::default()
+        },
+        crate::spotify::SpPlaylist {
+            id: "s2".into(),
+            name: "Someone else's".into(),
+            owner_id: "other".into(),
+            ..Default::default()
+        },
+    ];
+}
+
+#[test]
+fn spotify_menu_asks_for_client_id_first() {
+    let mut h = harness();
+    logged_in(&mut h);
+    h.state_mut().spotify_action(None);
+    h.run();
+    assert!(matches!(h.state().dialog, Some(super::Dialog::Settings(_))));
+    h.get_by_role_and_label(Role::TextInput, "Spotify Client ID");
+    h.get_by_role_and_label(Role::Button, "Paste: Spotify Client ID");
+    // «localhost» is refused for Spotify; Save is disabled until it is fixed.
+    if let Some(super::Dialog::Settings(f)) = &mut h.state_mut().dialog {
+        f.cfg.spotify_redirect_uri = "http://localhost:8766/callback".into();
+    }
+    h.run();
+    h.get_by_label_contains("«localhost» is not allowed");
+    assert!(h.get_by_role_and_label(Role::Button, "Save").accesskit_node().is_disabled());
+    h.key_press(Key::Escape);
+    h.run();
+}
+
+#[test]
+fn copy_from_spotify_lists_playlists_with_attribution() {
+    let mut h = harness();
+    logged_in(&mut h);
+    connect_spotify(&mut h);
+    h.state_mut().spotify_action(Some(super::Dialog::FromSpotify { selected: Default::default() }));
+    h.run();
+    h.get_by_label("Playlist and song information from Spotify.");
+    h.get_by_role_and_label(Role::CheckBox, "Liked Songs");
+    h.get_by_role_and_label(Role::CheckBox, "Summer (12 items)").click();
+    h.run();
+    h.get_by_role_and_label(Role::Button, "Find matches").click();
+    h.run();
+    assert!(h.state().dialog.is_none());
+    // The test worker has no TIDAL login, so the job ends at once with that error.
+    wait_for_log(&mut h, "Reading Spotify playlists and finding the songs on TIDAL");
+    assert!(matches!(h.state().spotify, super::SpState::On(_)), "a TIDAL error must not disconnect Spotify");
+}
+
+#[test]
+fn review_copy_to_spotify() {
+    use crate::ops::files::{ImportPlaylist, ImportRow};
+    use crate::ops::matcher::{MatchMethod, MatchRow};
+    let mut h = harness();
+    logged_in(&mut h);
+    connect_spotify(&mut h);
+    let row = ImportRow { title: "First song".into(), artists: vec!["Artist".into()], ..Default::default() };
+    let hit =
+        Track { id: "spid1".into(), title: "First song".into(), artists: vec!["Artist".into()], ..Default::default() };
+    let rows = vec![
+        MatchRow {
+            row: row.clone(),
+            matched: Some(hit),
+            confidence: 0.97,
+            method: MatchMethod::Isrc,
+            include: true,
+            alternatives: vec![],
+        },
+        MatchRow {
+            row,
+            matched: None,
+            confidence: 0.0,
+            method: MatchMethod::None,
+            include: false,
+            alternatives: vec![],
+        },
+    ];
+    let pl = ImportPlaylist { name: "Road trip".into(), rows: vec![], ..Default::default() };
+    h.state_mut().open_dialog(super::Dialog::import_review(crate::worker::Dest::Spotify, vec![(pl, rows)]));
+    h.run();
+    h.get_by_label("Check the copy to Spotify");
+    h.get_by_label("Playlist and song information from Spotify.");
+    h.get_by_label("Open in Spotify");
+    h.get_by_role_and_label(Role::CheckBox, "Public on Spotify");
+    // Only playlists the user owns on Spotify are offered as targets (not Liked Songs, not others').
+    h.get_by_role_and_label(Role::Button, "Copy 1 songs to Spotify").click();
+    h.run();
+    assert!(h.state().dialog.is_none());
+    wait_for_log(&mut h, "Copying to Spotify: Road trip");
+    // The worker had no Spotify connection: that is a Spotify login error → disconnected.
+    assert!(matches!(h.state().spotify, super::SpState::Off));
+}

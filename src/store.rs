@@ -56,6 +56,9 @@ pub struct Config {
     pub strict_availability: bool,
     /// Unavailable-songs scan also asks for playback (finds GEO_RESTRICTED).
     pub geo_check: bool,
+    pub spotify_client_id: String,
+    /// Spotify requires a loopback IP literal for local apps (not "localhost").
+    pub spotify_redirect_uri: String,
 }
 
 impl Default for Config {
@@ -75,6 +78,8 @@ impl Default for Config {
             show_search: true,
             strict_availability: false,
             geo_check: false,
+            spotify_client_id: String::new(),
+            spotify_redirect_uri: "http://127.0.0.1:8766/callback".into(),
         }
     }
 }
@@ -82,6 +87,7 @@ impl Default for Config {
 pub struct Paths {
     pub config_file: PathBuf,
     pub token_file: PathBuf,
+    pub spotify_token_file: PathBuf,
     pub cache_file: PathBuf,
     pub backup_dir: PathBuf,
 }
@@ -105,6 +111,7 @@ impl Paths {
         Self {
             config_file: cfg.join("config.toml"),
             token_file: cfg.join("tokens.json"),
+            spotify_token_file: cfg.join("spotify-tokens.json"),
             cache_file: data.join("track-cache.json"),
             backup_dir: data.join("backups"),
         }
@@ -131,6 +138,10 @@ impl Config {
 
     pub fn has_client(&self) -> bool {
         !self.client_id.trim().is_empty()
+    }
+
+    pub fn has_spotify(&self) -> bool {
+        !self.spotify_client_id.trim().is_empty()
     }
 }
 

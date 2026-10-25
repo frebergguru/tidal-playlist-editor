@@ -19,6 +19,7 @@ use crate::api::{Album, Artist, ItemRef, Playlist, PlaylistItem, SearchResults, 
 use crate::i18n::{self, Tr};
 use crate::ops::analysis::SortKey;
 use crate::player::{PlayerCmd, PlayerHandle};
+use crate::spotify::{SpPlaylist, SpUser};
 use crate::store::{Config, OpenIn, Paths, TrackCache};
 use crate::worker::{Cmd, Event, Job, JobId, Note, PreviewFail, WorkerHandle};
 
@@ -30,6 +31,14 @@ pub enum AuthState {
     LoggedOut,
     LoggingIn { url: String },
     LoggedIn,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum SpState {
+    Off,
+    Checking,
+    LoggingIn { url: String },
+    On(SpUser),
 }
 
 #[derive(Default)]
@@ -71,6 +80,7 @@ pub struct SearchState {
 pub enum JobKind {
     Plain,
     Login,
+    SpotifyLogin,
     Scan,
     Replacements,
     Match,
@@ -126,6 +136,9 @@ pub struct App {
     pub preview_status: Option<String>,
     pub reduced_motion: bool,
     pub copy_text: Option<String>,
+    pub spotify: SpState,
+    /// Held in memory only (Spotify Developer Terms: no caching of content).
+    pub sp_playlists: Vec<SpPlaylist>,
     applied_scale: f32,
 }
 
@@ -138,7 +151,8 @@ impl App {
         let repaint: Arc<dyn Fn() + Send + Sync> = Arc::new(move || repaint_ctx.request_repaint());
         let r2 = repaint.clone();
         let player = PlayerHandle::spawn(cfg.volume, move || r2());
-        let worker = WorkerHandle::spawn(paths.token_file.clone(), player.clone(), repaint);
+        let worker =
+            WorkerHandle::spawn(paths.token_file.clone(), paths.spotify_token_file.clone(), player.clone(), repaint);
         let reduced_motion = style::reduced_motion(&cfg);
         style::install_fonts(&ctx);
         style::apply(&ctx, &cfg, reduced_motion);
@@ -175,10 +189,16 @@ impl App {
             preview_status: None,
             reduced_motion,
             copy_text: None,
+            spotify: SpState::Off,
+            sp_playlists: Vec::new(),
             applied_scale: cfg.text_scale,
             cfg,
             paths,
         };
+        if app.cfg.has_spotify() {
+            app.spotify = SpState::Checking;
+            app.worker.send(Cmd::SpotifyRestore(app.spotify_config()));
+        }
         if app.cfg.has_client() {
             app.auth = AuthState::Checking;
             app.worker.send(Cmd::RestoreSession(app.auth_config()));
@@ -188,6 +208,52 @@ impl App {
 
     pub fn auth_config(&self) -> AuthConfig {
         AuthConfig::new(&self.cfg.client_id, Some(self.cfg.client_secret.clone()), &self.cfg.redirect_uri)
+    }
+
+    pub fn spotify_config(&self) -> AuthConfig {
+        AuthConfig::spotify(&self.cfg.spotify_client_id, &self.cfg.spotify_redirect_uri)
+    }
+
+    pub fn spotify_user(&self) -> Option<&SpUser> {
+        match &self.spotify {
+            SpState::On(u) => Some(u),
+            _ => None,
+        }
+    }
+
+    pub fn cancel_jobs(&self, kind: &JobKind) {
+        for j in self.jobs.iter().filter(|j| &j.kind == kind) {
+            j.job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Spotify menu actions: connect first when needed, ask for a Client ID first when missing.
+    pub fn spotify_action(&mut self, then: Option<Dialog>) {
+        if !self.cfg.has_spotify() {
+            self.note(self.tr.spotify_need_client);
+            self.open_dialog(Dialog::settings(&self.cfg));
+            return;
+        }
+        match (&self.spotify, then) {
+            (SpState::On(_), Some(d)) => {
+                if self.sp_playlists.is_empty() {
+                    self.worker.send(Cmd::SpotifyLoadPlaylists);
+                }
+                self.open_dialog(d);
+            }
+            (SpState::On(_), None) => {}
+            _ => {
+                if !self.job_running(&JobKind::SpotifyLogin) {
+                    let job = self.start_job(self.tr.spotify_connect, JobKind::SpotifyLogin);
+                    self.worker.send(Cmd::SpotifyLogin(self.spotify_config(), job));
+                }
+                self.open_dialog(Dialog::SpotifyLogin);
+            }
+        }
+    }
+
+    pub fn job_running(&self, kind: &JobKind) -> bool {
+        self.jobs.iter().any(|j| &j.kind == kind)
     }
 
     pub fn save_cfg(&self) {
@@ -474,9 +540,37 @@ impl App {
                     u.set_replacements(list);
                 }
             }
-            Event::Matches(playlists) => {
-                self.open_dialog(Dialog::import_review(playlists, &self.playlists));
+            Event::Matches { dest, playlists } => {
+                self.open_dialog(Dialog::import_review(dest, playlists));
             }
+            Event::SpotifyLoginStarted(url) => self.spotify = SpState::LoggingIn { url },
+            Event::SpotifyLoggedIn(user) => {
+                self.note(i18n::fmt(tr.spotify_connected_as, &[&user.display_name]));
+                self.spotify = SpState::On(user);
+                if matches!(self.dialog, Some(Dialog::SpotifyLogin)) {
+                    self.dialog = None;
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                self.worker.send(Cmd::SpotifyLoadPlaylists);
+            }
+            Event::SpotifyLoggedOut { expired } => {
+                if expired {
+                    self.error(tr.spotify_expired);
+                }
+                self.spotify = SpState::Off;
+                self.sp_playlists.clear();
+                if matches!(self.dialog, Some(Dialog::SpotifyLogin)) {
+                    self.dialog = None;
+                }
+            }
+            Event::SpotifyLoginFailed(e) => {
+                self.spotify = SpState::Off;
+                if matches!(self.dialog, Some(Dialog::SpotifyLogin)) {
+                    self.dialog = None;
+                }
+                self.error(format!("{}: {e}", tr.spotify_login_failed));
+            }
+            Event::SpotifyPlaylists(p) => self.sp_playlists = p,
             Event::ExportData { data, format, dir, backup } => {
                 let r = dialogs::write_export(self, &data, format, &dir, backup);
                 match r {
@@ -527,6 +621,8 @@ impl App {
             Note::Replaced(n) => i18n::fmt(tr.replaced_n, &[&n.to_string()]),
             Note::Favourited { n, add: true } => i18n::fmt(tr.favourited_n, &[&n.to_string()]),
             Note::Favourited { n, add: false } => i18n::fmt(tr.unfavourited_n, &[&n.to_string()]),
+            Note::Skipped(n) => i18n::fmt(tr.skipped_n, &[&n.to_string()]),
+            Note::SpotifyWritten { name, n } => i18n::fmt(tr.spotify_written, &[&n.to_string(), name]),
         }
     }
 
@@ -707,6 +803,35 @@ impl App {
                 {
                     let d = Dialog::duplicates(self, &p.id);
                     self.open_dialog(d);
+                }
+            });
+            ui.menu_button(tr.menu_spotify, |ui| match self.spotify.clone() {
+                SpState::On(u) => {
+                    ui.label(i18n::fmt(tr.spotify_connected_as, &[&u.display_name]));
+                    if ui.add_enabled(logged_in, egui::Button::new(tr.from_spotify_dots)).clicked() {
+                        self.spotify_action(Some(Dialog::FromSpotify { selected: HashSet::new() }));
+                    }
+                    if ui.add_enabled(logged_in, egui::Button::new(tr.to_spotify_dots)).clicked() {
+                        let sel = self.current.iter().cloned().collect();
+                        self.spotify_action(Some(Dialog::ToSpotify { selected: sel }));
+                    }
+                    if ui.button(tr.spotify_disconnect).clicked() {
+                        self.worker.send(Cmd::SpotifyLogout);
+                    }
+                }
+                SpState::Checking => {
+                    ui.label(tr.checking_session);
+                }
+                SpState::Off | SpState::LoggingIn { .. } => {
+                    if ui.button(tr.spotify_connect_dots).clicked() {
+                        self.spotify_action(None);
+                    }
+                    if ui.add_enabled(logged_in, egui::Button::new(tr.from_spotify_dots)).clicked() {
+                        self.spotify_action(None);
+                    }
+                    if ui.add_enabled(logged_in, egui::Button::new(tr.to_spotify_dots)).clicked() {
+                        self.spotify_action(None);
+                    }
                 }
             });
             ui.menu_button(tr.menu_view, |ui| {

@@ -11,8 +11,9 @@ use crate::i18n::{self, Tr};
 use crate::ops::analysis::{self, DupGroup, DupMode, SortKey};
 use crate::ops::files::{self, ExportFormat, ExportPlaylist, ImportPlaylist};
 use crate::ops::matcher::{MatchMethod, MatchRow};
+use crate::spotify::SpPlaylist;
 use crate::store::{Config, Language, MotionChoice, OpenIn, ThemeChoice};
-use crate::worker::{Cmd, Reason, UnavailableHit};
+use crate::worker::{Cmd, Dest, Reason, UnavailableHit};
 
 pub struct SettingsForm {
     pub cfg: Config,
@@ -56,6 +57,8 @@ pub struct ImportEntry {
     pub target: ImportTarget,
     pub name: String,
     pub skip_dups: bool,
+    /// Spotify only: make a new playlist public.
+    pub public: bool,
 }
 
 pub struct RestoreEntry {
@@ -111,7 +114,17 @@ pub enum Dialog {
         groups: Vec<DupGroup>,
         remove: HashSet<usize>,
     },
-    ImportReview(Vec<ImportEntry>),
+    ImportReview {
+        dest: Dest,
+        entries: Vec<ImportEntry>,
+    },
+    SpotifyLogin,
+    FromSpotify {
+        selected: HashSet<String>,
+    },
+    ToSpotify {
+        selected: HashSet<String>,
+    },
     Export {
         selected: HashSet<String>,
         format: ExportFormat,
@@ -189,17 +202,19 @@ impl Dialog {
         let remove = groups.iter().flat_map(|g| g.extra.iter().copied()).collect();
         Dialog::Duplicates { pid: pid.to_owned(), mode, groups, remove }
     }
-    pub fn import_review(playlists: Vec<(ImportPlaylist, Vec<MatchRow>)>, mine: &[Playlist]) -> Self {
-        Dialog::ImportReview(
-            playlists
-                .into_iter()
-                .map(|(source, rows)| {
-                    let existing = mine.iter().find(|p| p.name == source.name && p.owned).map(|p| p.id.clone());
-                    let _ = existing;
-                    ImportEntry { name: source.name.clone(), source, rows, target: ImportTarget::New, skip_dups: true }
-                })
-                .collect(),
-        )
+    pub fn import_review(dest: Dest, playlists: Vec<(ImportPlaylist, Vec<MatchRow>)>) -> Self {
+        let entries = playlists
+            .into_iter()
+            .map(|(source, rows)| ImportEntry {
+                name: source.name.clone(),
+                public: false,
+                source,
+                rows,
+                target: ImportTarget::New,
+                skip_dups: true,
+            })
+            .collect();
+        Dialog::ImportReview { dest, entries }
     }
 }
 
@@ -565,7 +580,10 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             }
             if ok || cancel || esc { Outcome::Close } else { Outcome::Keep }
         }
-        Dialog::ImportReview(entries) => import_review(app, ctx, entries, first),
+        Dialog::ImportReview { dest, entries } => import_review(app, ctx, *dest, entries, first),
+        Dialog::SpotifyLogin => spotify_login(app, ctx, first),
+        Dialog::FromSpotify { selected } => from_spotify(app, ctx, selected, first),
+        Dialog::ToSpotify { selected } => to_spotify(app, ctx, selected, first),
         Dialog::Export { selected, format } => {
             let list = app.playlists.clone();
             let (esc, (ok, cancel)) = frame(ctx, "export", tr.export_playlists, |ui| {
@@ -717,9 +735,24 @@ fn settings(app: &mut App, ctx: &egui::Context, f: &mut SettingsForm, first: boo
             pasteable_text(ui, tr, tr.client_secret_optional, &mut c.client_secret, true);
             pasteable_text(ui, tr, tr.redirect_uri, &mut c.redirect_uri, false);
             ui.label(RichText::new(tr.paste_hint).weak());
+            ui.separator();
+            ui.strong("Spotify");
+            ui.label(tr.spotify_setup_steps);
+            pasteable_text(ui, tr, tr.spotify_client_id, &mut c.spotify_client_id, false);
+            pasteable_text(ui, tr, tr.spotify_redirect_uri, &mut c.spotify_redirect_uri, false);
+            ui.hyperlink_to(tr.spotify_dashboard, "https://developer.spotify.com/dashboard");
             ui.hyperlink_to(tr.developer_portal, "https://developer.tidal.com/dashboard");
         });
-        let valid = url::Url::parse(c.redirect_uri.trim()).is_ok_and(|u| u.port_or_known_default().is_some());
+        // Spotify allows plain http only for loopback IP literals, never "localhost".
+        let sp_valid = c.spotify_redirect_uri.trim().is_empty()
+            || url::Url::parse(c.spotify_redirect_uri.trim()).is_ok_and(|u| {
+                u.scheme() == "http" && matches!(u.host_str(), Some("127.0.0.1" | "[::1]")) && u.port().is_some()
+            });
+        if !sp_valid {
+            ui.label(RichText::new(format!("⚠ {}", tr.spotify_redirect_invalid)).strong());
+        }
+        let valid =
+            sp_valid && url::Url::parse(c.redirect_uri.trim()).is_ok_and(|u| u.port_or_known_default().is_some());
         if !valid {
             ui.label(RichText::new(format!("⚠ {}", tr.redirect_invalid)).strong());
         }
@@ -731,6 +764,12 @@ fn settings(app: &mut App, ctx: &egui::Context, f: &mut SettingsForm, first: boo
             || app.cfg.client_secret != c.client_secret;
         c.client_id = c.client_id.trim().to_owned();
         c.redirect_uri = c.redirect_uri.trim().to_owned();
+        c.spotify_client_id = c.spotify_client_id.trim().to_owned();
+        c.spotify_redirect_uri = c.spotify_redirect_uri.trim().to_owned();
+        if app.cfg.spotify_client_id != c.spotify_client_id || app.cfg.spotify_redirect_uri != c.spotify_redirect_uri {
+            // A different Spotify app: the old login no longer applies.
+            app.worker.send(Cmd::SpotifyLogout);
+        }
         // Keep runtime state the dialog does not edit.
         c.last_playlist = app.cfg.last_playlist.clone();
         c.export_dir = app.cfg.export_dir.clone();
@@ -942,11 +981,29 @@ fn method_text(tr: &Tr, m: MatchMethod) -> &'static str {
     }
 }
 
-fn import_review(app: &mut App, ctx: &egui::Context, entries: &mut [ImportEntry], first: bool) -> Outcome {
+fn import_review(app: &mut App, ctx: &egui::Context, dest: Dest, entries: &mut [ImportEntry], first: bool) -> Outcome {
     let tr = app.tr;
-    let mine: Vec<Playlist> = app.playlists.iter().filter(|p| p.owned).cloned().collect();
-    let (esc, (ok, cancel)) = frame(ctx, "import", tr.import_review, |ui| {
+    // Playlists the songs can be added to: owned ones in the destination service.
+    let mine: Vec<(String, String)> = match dest {
+        Dest::Tidal => app.playlists.iter().filter(|p| p.owned).map(|p| (p.id.clone(), p.name.clone())).collect(),
+        Dest::Spotify => {
+            let me = app.spotify_user().map(|u| u.id.clone()).unwrap_or_default();
+            app.sp_playlists
+                .iter()
+                .filter(|p| !p.is_liked_songs() && p.owner_id == me)
+                .map(|p| (p.id.clone(), p.name.clone()))
+                .collect()
+        }
+    };
+    let title = match dest {
+        Dest::Tidal => tr.import_review,
+        Dest::Spotify => tr.review_to_spotify,
+    };
+    let (esc, (ok, cancel)) = frame(ctx, "import", title, |ui| {
         ui.label(tr.import_review_explain);
+        if dest == Dest::Spotify {
+            ui.label(RichText::new(tr.spotify_attribution).italics());
+        }
         egui::ScrollArea::vertical().max_height(ui.available_height() - 80.0).show(ui, |ui| {
             for (e_idx, e) in entries.iter_mut().enumerate() {
                 ui.push_id(e_idx, |ui| {
@@ -972,7 +1029,7 @@ fn import_review(app: &mut App, ctx: &egui::Context, entries: &mut [ImportEntry]
                     ui.horizontal_wrapped(|ui| {
                         let current = match &e.target {
                             ImportTarget::Existing(id) => {
-                                mine.iter().find(|p| &p.id == id).map(|p| p.name.clone()).unwrap_or_default()
+                                mine.iter().find(|p| &p.0 == id).map(|p| p.1.clone()).unwrap_or_default()
                             }
                             ImportTarget::New => tr.choose_dots.to_owned(),
                         };
@@ -980,14 +1037,17 @@ fn import_review(app: &mut App, ctx: &egui::Context, entries: &mut [ImportEntry]
                         let c = egui::ComboBox::from_id_salt(("imp-target", e_idx)).selected_text(current).show_ui(
                             ui,
                             |ui| {
-                                for p in &mine {
-                                    ui.selectable_value(&mut e.target, ImportTarget::Existing(p.id.clone()), &p.name);
+                                for (id, name) in &mine {
+                                    ui.selectable_value(&mut e.target, ImportTarget::Existing(id.clone()), name);
                                 }
                             },
                         );
                         c.response.labelled_by(l.id);
-                        if matches!(e.target, ImportTarget::Existing(_)) {
+                        if dest == Dest::Tidal && matches!(e.target, ImportTarget::Existing(_)) {
                             ui.checkbox(&mut e.skip_dups, tr.skip_already_present);
+                        }
+                        if dest == Dest::Spotify && e.target == ImportTarget::New {
+                            ui.checkbox(&mut e.public, tr.public_on_spotify);
                         }
                     });
                     ui.label(i18n::fmt(tr.will_add_n, &[&included.to_string()]));
@@ -1009,6 +1069,11 @@ fn import_review(app: &mut App, ctx: &egui::Context, entries: &mut [ImportEntry]
                                     enabled,
                                     egui::Checkbox::new(&mut r.include, format!("{}. {src} {target}", n + 1)),
                                 );
+                                if dest == Dest::Spotify
+                                    && let Some(t) = &r.matched
+                                {
+                                    ui.hyperlink_to(tr.open_in_spotify, crate::spotify::track_url(&t.id));
+                                }
                                 if !r.alternatives.is_empty() {
                                     let alts = r.alternatives.clone();
                                     let c = egui::ComboBox::from_id_salt(("alt", n))
@@ -1040,9 +1105,37 @@ fn import_review(app: &mut App, ctx: &egui::Context, entries: &mut [ImportEntry]
         let total: usize =
             entries.iter().map(|e| e.rows.iter().filter(|r| r.include && r.matched.is_some()).count()).sum();
         let valid = entries.iter().all(|e| e.target != ImportTarget::New || !e.name.trim().is_empty());
-        ok_cancel(ui, tr, &i18n::fmt(tr.import_n, &[&total.to_string()]), total > 0 && valid)
+        let label = match dest {
+            Dest::Tidal => i18n::fmt(tr.import_n, &[&total.to_string()]),
+            Dest::Spotify => i18n::fmt(tr.copy_n_to_spotify, &[&total.to_string()]),
+        };
+        ok_cancel(ui, tr, &label, total > 0 && valid)
     });
-    if ok {
+    if ok && dest == Dest::Spotify {
+        for e in entries.iter() {
+            let ids: Vec<String> =
+                e.rows.iter().filter(|r| r.include).filter_map(|r| r.matched.as_ref()).map(|t| t.id.clone()).collect();
+            if ids.is_empty() {
+                continue;
+            }
+            let (target, name) = match &e.target {
+                ImportTarget::New => (None, e.name.trim().to_owned()),
+                ImportTarget::Existing(id) => {
+                    (Some(id.clone()), mine.iter().find(|p| &p.0 == id).map(|p| p.1.clone()).unwrap_or_default())
+                }
+            };
+            let job = app.start_job(i18n::fmt(tr.copying_to_spotify, &[&name]), JobKind::Plain);
+            app.worker.send(Cmd::SpotifyWrite {
+                name,
+                description: e.source.description.clone(),
+                public: e.public,
+                target,
+                ids,
+                job,
+            });
+        }
+    }
+    if ok && dest == Dest::Tidal {
         for e in entries.iter() {
             let refs: Vec<ItemRef> =
                 e.rows.iter().filter(|r| r.include).filter_map(|r| r.matched.as_ref()).map(Track::item_ref).collect();
@@ -1063,6 +1156,135 @@ fn import_review(app: &mut App, ctx: &egui::Context, entries: &mut [ImportEntry]
                 ImportTarget::Existing(pid) => app.add_to_playlist(pid, refs, e.skip_dups),
             }
         }
+    }
+    if ok || cancel || esc { Outcome::Close } else { Outcome::Keep }
+}
+
+fn spotify_login(app: &mut App, ctx: &egui::Context, first: bool) -> Outcome {
+    let tr = app.tr;
+    let url = match &app.spotify {
+        super::SpState::LoggingIn { url } => Some(url.clone()),
+        super::SpState::Off | super::SpState::Checking => None,
+        // Connected: nothing left to wait for.
+        super::SpState::On(_) => return Outcome::Close,
+    };
+    let (esc, cancel) = frame(ctx, "sp-login", tr.spotify_connect, |ui| {
+        ui.label(tr.spotify_waiting);
+        let mut cancel = false;
+        ui.horizontal_wrapped(|ui| {
+            if let Some(u) = &url {
+                if ui.button(tr.open_login_page_again).clicked() {
+                    let _ = open::that_detached(u);
+                }
+                if ui.button(tr.copy_login_link).clicked() {
+                    ui.ctx().copy_text(u.clone());
+                }
+            } else {
+                ui.spinner();
+            }
+            let c = ui.button(tr.cancel);
+            if first {
+                c.request_focus();
+            }
+            cancel = c.clicked();
+        });
+        cancel
+    });
+    if cancel || esc {
+        app.cancel_jobs(&JobKind::SpotifyLogin);
+        return Outcome::Close;
+    }
+    Outcome::Keep
+}
+
+/// Checkbox list of playlists; returns (ok, cancel).
+fn pick_list(
+    ui: &mut egui::Ui,
+    tr: &Tr,
+    items: &[(String, String)],
+    selected: &mut HashSet<String>,
+    first: bool,
+    ok_label: &str,
+) -> (bool, bool) {
+    ui.horizontal(|ui| {
+        if ui.button(tr.select_all).clicked() {
+            *selected = items.iter().map(|i| i.0.clone()).collect();
+        }
+        if ui.button(tr.select_none).clicked() {
+            selected.clear();
+        }
+    });
+    egui::ScrollArea::vertical().max_height(ui.available_height() - 80.0).show(ui, |ui| {
+        for (n, (id, name)) in items.iter().enumerate() {
+            let mut on = selected.contains(id);
+            let r = ui.checkbox(&mut on, name);
+            if first && n == 0 {
+                r.request_focus();
+            }
+            if r.changed() {
+                if on {
+                    selected.insert(id.clone())
+                } else {
+                    selected.remove(id)
+                };
+            }
+        }
+    });
+    ok_cancel(ui, tr, ok_label, !selected.is_empty())
+}
+
+fn from_spotify(app: &mut App, ctx: &egui::Context, selected: &mut HashSet<String>, first: bool) -> Outcome {
+    let tr = app.tr;
+    let items: Vec<(String, String)> = app
+        .sp_playlists
+        .iter()
+        .map(|p| {
+            let name = if p.is_liked_songs() { tr.liked_songs.to_owned() } else { p.name.clone() };
+            let n = p.total.map(|n| format!(" ({})", i18n::fmt(tr.n_items, &[&n.to_string()]))).unwrap_or_default();
+            (p.id.clone(), format!("{name}{n}"))
+        })
+        .collect();
+    let (esc, (ok, cancel)) = frame(ctx, "from-sp", tr.from_spotify, |ui| {
+        ui.label(tr.from_spotify_explain);
+        ui.label(RichText::new(tr.spotify_attribution).italics());
+        if items.is_empty() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(tr.loading);
+            });
+        }
+        pick_list(ui, tr, &items, selected, first, tr.find_matches)
+    });
+    if ok {
+        let pls: Vec<SpPlaylist> = app
+            .sp_playlists
+            .iter()
+            .filter(|p| selected.contains(&p.id))
+            .map(|p| {
+                let mut p = p.clone();
+                if p.is_liked_songs() {
+                    p.name = tr.liked_songs.to_owned();
+                }
+                p
+            })
+            .collect();
+        let job = app.start_job(tr.reading_spotify, JobKind::Match);
+        app.worker.send(Cmd::FromSpotify { playlists: pls, job });
+    }
+    if ok || cancel || esc { Outcome::Close } else { Outcome::Keep }
+}
+
+fn to_spotify(app: &mut App, ctx: &egui::Context, selected: &mut HashSet<String>, first: bool) -> Outcome {
+    let tr = app.tr;
+    let items: Vec<(String, String)> = app.playlists.iter().map(|p| (p.id.clone(), p.name.clone())).collect();
+    let (esc, (ok, cancel)) = frame(ctx, "to-sp", tr.to_spotify, |ui| {
+        ui.label(tr.to_spotify_explain);
+        pick_list(ui, tr, &items, selected, first, tr.find_matches)
+    });
+    if ok {
+        let pls: Vec<Playlist> = app.playlists.iter().filter(|p| selected.contains(&p.id)).cloned().collect();
+        let job = app.start_job(tr.matching_on_spotify, JobKind::Match);
+        app.worker.send(Cmd::ToSpotify { playlists: pls, known: app.cache.tracks.clone(), job });
     }
     if ok || cancel || esc { Outcome::Close } else { Outcome::Keep }
 }

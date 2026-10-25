@@ -1,8 +1,37 @@
-//! Matches imported rows (id / ISRC / artist + title) to TIDAL tracks.
+//! Matches imported rows (id / ISRC / artist + title) to tracks in a catalogue
+//! (TIDAL, or Spotify when cloning playlists there).
 
 use std::collections::HashMap;
+use std::future::Future;
 
 use crate::api::{Client, ItemKind, Result, Track};
+
+/// A music catalogue that rows can be matched against.
+pub trait Catalog: Sync {
+    /// True when the rows' `id`s belong to this catalogue (TIDAL ids for TIDAL).
+    fn native_ids(&self) -> bool {
+        true
+    }
+    fn lookup_ids(
+        &self,
+        ids: &[String],
+        cancel: &(dyn Fn() -> bool + Sync),
+    ) -> impl Future<Output = Result<Vec<Track>>> + Send;
+    fn by_isrc(&self, isrc: &str) -> impl Future<Output = Result<Vec<Track>>> + Send;
+    fn search(&self, row: &ImportRow) -> impl Future<Output = Result<Vec<Track>>> + Send;
+}
+
+impl Catalog for Client {
+    async fn lookup_ids(&self, ids: &[String], cancel: &(dyn Fn() -> bool + Sync)) -> Result<Vec<Track>> {
+        self.tracks_by_ids(ids, cancel).await
+    }
+    async fn by_isrc(&self, isrc: &str) -> Result<Vec<Track>> {
+        self.tracks_by_isrc(isrc).await
+    }
+    async fn search(&self, row: &ImportRow) -> Result<Vec<Track>> {
+        Ok(Client::search(self, &search_text(row)).await?.tracks)
+    }
+}
 use crate::ops::files::ImportRow;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,8 +145,8 @@ pub fn search_text(row: &ImportRow) -> String {
     format!("{artist} {title}").trim().to_owned()
 }
 
-pub async fn match_rows(
-    client: &Client,
+pub async fn match_rows<C: Catalog>(
+    client: &C,
     rows: Vec<ImportRow>,
     progress: &(dyn Fn(usize) + Sync),
     cancel: &(dyn Fn() -> bool + Sync),
@@ -134,12 +163,17 @@ pub async fn match_rows(
         })
         .collect();
 
-    // 1. Exact TIDAL ids (tracks via lookup; videos are accepted as-is).
-    let ids: Vec<String> =
-        out.iter().filter(|m| m.row.kind == ItemKind::Track).filter_map(|m| m.row.id.clone()).collect();
+    // 1. Exact ids (tracks via lookup; videos are accepted as-is) — only when
+    //    the ids belong to this catalogue.
+    let native = client.native_ids();
+    let ids: Vec<String> = if native {
+        out.iter().filter(|m| m.row.kind == ItemKind::Track).filter_map(|m| m.row.id.clone()).collect()
+    } else {
+        Vec::new()
+    };
     let found: HashMap<String, Track> =
-        client.tracks_by_ids(&ids, cancel).await?.into_iter().map(|t| (t.id.clone(), t)).collect();
-    for m in &mut out {
+        client.lookup_ids(&ids, cancel).await?.into_iter().map(|t| (t.id.clone(), t)).collect();
+    for m in out.iter_mut().filter(|_| native) {
         let Some(id) = &m.row.id else { continue };
         let hit = match m.row.kind {
             ItemKind::Track => found.get(id).cloned(),
@@ -168,7 +202,7 @@ pub async fn match_rows(
             return Err(crate::api::ApiError::Cancelled);
         }
         if let Some(isrc) = m.row.isrc.clone() {
-            let cands = client.tracks_by_isrc(&isrc).await.unwrap_or_default();
+            let cands = client.by_isrc(&isrc).await.unwrap_or_default();
             if !cands.is_empty() {
                 let (hit, conf, alts) = best(&m.row, cands);
                 // Same ISRC is the same recording, so it is a strong match even
@@ -184,8 +218,8 @@ pub async fn match_rows(
             }
         }
         if m.matched.is_none() && !m.row.title.is_empty() {
-            let res = client.search(&search_text(&m.row)).await?;
-            let (hit, conf, alts) = best(&m.row, res.tracks);
+            let res = client.search(&m.row).await?;
+            let (hit, conf, alts) = best(&m.row, res);
             m.alternatives = alts;
             if let Some(t) = hit {
                 m.matched = Some(t);

@@ -15,6 +15,7 @@ use crate::ops::analysis;
 use crate::ops::files::{ExportFormat, ImportPlaylist};
 use crate::ops::matcher::{self, MatchRow};
 use crate::player::{PlayerCmd, PlayerHandle, dash};
+use crate::spotify::{SpPlaylist, SpUser, SpotifyClient};
 
 pub type JobId = u64;
 
@@ -62,42 +63,156 @@ pub enum Cmd {
     Logout,
     LoadPlaylists,
     LoadItems(String),
-    CreatePlaylist { name: String, description: String, access: AccessType, add: Vec<ItemRef>, job: Job },
-    UpdatePlaylist { pid: String, name: String, description: String, access: AccessType },
+    CreatePlaylist {
+        name: String,
+        description: String,
+        access: AccessType,
+        add: Vec<ItemRef>,
+        job: Job,
+    },
+    UpdatePlaylist {
+        pid: String,
+        name: String,
+        description: String,
+        access: AccessType,
+    },
     DeletePlaylist(String),
-    AddItems { pid: String, refs: Vec<ItemRef>, before: Option<String>, skip_dups: bool, job: Job },
-    RemoveItems { pid: String, items: Vec<(ItemRef, String)>, job: Job },
-    MoveItems { pid: String, items: Vec<(ItemRef, String)>, before: Option<String> },
-    ApplyOrder { pid: String, current: Vec<PlaylistItem>, order: Vec<PlaylistItem>, job: Job },
-    Restore { pid: String, target: Vec<ItemRef>, job: Job },
-    Duplicate { source: Playlist, name: String, job: Job },
-    Merge { sources: Vec<Playlist>, name: String, dedupe: bool, job: Job },
+    AddItems {
+        pid: String,
+        refs: Vec<ItemRef>,
+        before: Option<String>,
+        skip_dups: bool,
+        job: Job,
+    },
+    RemoveItems {
+        pid: String,
+        items: Vec<(ItemRef, String)>,
+        job: Job,
+    },
+    MoveItems {
+        pid: String,
+        items: Vec<(ItemRef, String)>,
+        before: Option<String>,
+    },
+    ApplyOrder {
+        pid: String,
+        current: Vec<PlaylistItem>,
+        order: Vec<PlaylistItem>,
+        job: Job,
+    },
+    Restore {
+        pid: String,
+        target: Vec<ItemRef>,
+        job: Job,
+    },
+    Duplicate {
+        source: Playlist,
+        name: String,
+        job: Job,
+    },
+    Merge {
+        sources: Vec<Playlist>,
+        name: String,
+        dedupe: bool,
+        job: Job,
+    },
     Search(String),
     SearchMore(String),
     AlbumTracks(Album),
     ArtistDetails(Artist),
-    ScanUnavailable { playlists: Vec<Playlist>, strict: bool, geo: bool, job: Job },
-    FindReplacements { hits: Vec<UnavailableHit>, job: Job },
-    Replace { pid: String, swaps: Vec<(PlaylistItem, Track)>, job: Job },
-    Match { playlists: Vec<ImportPlaylist>, job: Job },
-    FetchForExport { playlists: Vec<Playlist>, format: ExportFormat, dir: PathBuf, backup: bool, job: Job },
-    Favourite { ids: Vec<String>, add: bool },
+    ScanUnavailable {
+        playlists: Vec<Playlist>,
+        strict: bool,
+        geo: bool,
+        job: Job,
+    },
+    FindReplacements {
+        hits: Vec<UnavailableHit>,
+        job: Job,
+    },
+    Replace {
+        pid: String,
+        swaps: Vec<(PlaylistItem, Track)>,
+        job: Job,
+    },
+    Match {
+        playlists: Vec<ImportPlaylist>,
+        job: Job,
+    },
+    FetchForExport {
+        playlists: Vec<Playlist>,
+        format: ExportFormat,
+        dir: PathBuf,
+        backup: bool,
+        job: Job,
+    },
+    Favourite {
+        ids: Vec<String>,
+        add: bool,
+    },
     Preview(Track),
+    SpotifyRestore(AuthConfig),
+    SpotifyLogin(AuthConfig, Job),
+    SpotifyLogout,
+    SpotifyLoadPlaylists,
+    /// Read Spotify playlists and match their songs on TIDAL (→ review dialog).
+    FromSpotify {
+        playlists: Vec<SpPlaylist>,
+        job: Job,
+    },
+    /// Read TIDAL playlists and match their songs on Spotify (→ review dialog).
+    /// `known` fills in names of TIDAL items that are no longer returned.
+    ToSpotify {
+        playlists: Vec<Playlist>,
+        known: std::collections::HashMap<String, Track>,
+        job: Job,
+    },
+    /// Create a Spotify playlist (or use `target`) and add the matched tracks.
+    SpotifyWrite {
+        name: String,
+        description: String,
+        public: bool,
+        target: Option<String>,
+        ids: Vec<String>,
+        job: Job,
+    },
+}
+
+/// Where matched songs will be written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dest {
+    Tidal,
+    Spotify,
 }
 
 #[derive(Clone, Debug)]
 pub enum Note {
-    Added { n: usize, skipped: usize },
+    Added {
+        n: usize,
+        skipped: usize,
+    },
     Removed(usize),
     Reordered,
     Created(String),
     Duplicated(String),
-    Merged { name: String, n: usize },
+    Merged {
+        name: String,
+        n: usize,
+    },
     Updated,
     Deleted,
     Restored,
     Replaced(usize),
-    Favourited { n: usize, add: bool },
+    Favourited {
+        n: usize,
+        add: bool,
+    },
+    /// Spotify items that cannot be moved (local files, podcast episodes, videos).
+    Skipped(usize),
+    SpotifyWritten {
+        name: String,
+        n: usize,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -114,22 +229,64 @@ pub enum Event {
     LoginFailed(String),
     LoggedOut,
     Playlists(Vec<Playlist>),
-    Items { pid: String, items: Vec<PlaylistItem> },
-    ItemsFailed { pid: String, error: String },
+    Items {
+        pid: String,
+        items: Vec<PlaylistItem>,
+    },
+    ItemsFailed {
+        pid: String,
+        error: String,
+    },
     PlaylistCreated(Playlist),
     PlaylistUpdated(Playlist),
     PlaylistDeleted(String),
     Search(SearchResults),
-    SearchMore { tracks: Vec<Track>, next: Option<String> },
-    Album { album: Album, tracks: Vec<Track> },
-    Artist { artist: Artist, albums: Vec<Album>, tracks: Vec<Track> },
-    Progress { job: JobId, done: usize, total: usize },
-    JobDone { job: JobId, note: Option<Note> },
-    JobFailed { job: JobId, error: String },
+    SearchMore {
+        tracks: Vec<Track>,
+        next: Option<String>,
+    },
+    Album {
+        album: Album,
+        tracks: Vec<Track>,
+    },
+    Artist {
+        artist: Artist,
+        albums: Vec<Album>,
+        tracks: Vec<Track>,
+    },
+    Progress {
+        job: JobId,
+        done: usize,
+        total: usize,
+    },
+    JobDone {
+        job: JobId,
+        note: Option<Note>,
+    },
+    JobFailed {
+        job: JobId,
+        error: String,
+    },
     Unavailable(Vec<UnavailableHit>),
     Replacements(Vec<(UnavailableHit, Option<Track>)>),
-    Matches(Vec<(ImportPlaylist, Vec<MatchRow>)>),
-    ExportData { data: Vec<(Playlist, Vec<PlaylistItem>)>, format: ExportFormat, dir: PathBuf, backup: bool },
+    Matches {
+        dest: Dest,
+        playlists: Vec<(ImportPlaylist, Vec<MatchRow>)>,
+    },
+    SpotifyLoginStarted(String),
+    SpotifyLoggedIn(SpUser),
+    /// `expired`: the refresh token stopped working; the user must connect again.
+    SpotifyLoggedOut {
+        expired: bool,
+    },
+    SpotifyLoginFailed(String),
+    SpotifyPlaylists(Vec<SpPlaylist>),
+    ExportData {
+        data: Vec<(Playlist, Vec<PlaylistItem>)>,
+        format: ExportFormat,
+        dir: PathBuf,
+        backup: bool,
+    },
     Note(Note),
     Error(String),
     PreviewLoading(String),
@@ -145,6 +302,8 @@ struct Ctx {
     write_lock: Arc<Mutex<()>>,
     token_path: PathBuf,
     player: PlayerHandle,
+    spotify: Arc<RwLock<Option<Arc<SpotifyClient>>>>,
+    sp_token_path: PathBuf,
 }
 
 impl Ctx {
@@ -155,6 +314,24 @@ impl Ctx {
 
     async fn client(&self) -> Result<Arc<Client>, ApiError> {
         self.client.read().await.clone().ok_or(ApiError::NotLoggedIn)
+    }
+
+    async fn spotify(&self) -> Result<Arc<SpotifyClient>, ApiError> {
+        self.spotify
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| ApiError::Auth(format!("{}: not connected", crate::spotify::LOGIN_ERROR)))
+    }
+
+    /// After a Spotify call failed: if the Spotify login is gone, forget it and tell the UI.
+    /// (TIDAL errors in the same job must not disconnect Spotify.)
+    async fn spotify_failed(&self, e: &ApiError) {
+        if crate::spotify::is_login_error(e) {
+            *self.spotify.write().await = None;
+            let _ = std::fs::remove_file(&self.sp_token_path);
+            self.emit(Event::SpotifyLoggedOut { expired: true });
+        }
     }
 
     fn progress(&self, job: &Job, total: usize) -> impl Fn(usize) + Sync + '_ {
@@ -169,7 +346,12 @@ pub struct WorkerHandle {
 }
 
 impl WorkerHandle {
-    pub fn spawn(token_path: PathBuf, player: PlayerHandle, repaint: Arc<dyn Fn() + Send + Sync>) -> Self {
+    pub fn spawn(
+        token_path: PathBuf,
+        sp_token_path: PathBuf,
+        player: PlayerHandle,
+        repaint: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Cmd>();
         let (etx, events) = mpsc::channel();
         let ctx = Ctx {
@@ -179,6 +361,8 @@ impl WorkerHandle {
             write_lock: Arc::new(Mutex::new(())),
             token_path,
             player,
+            spotify: Arc::new(RwLock::new(None)),
+            sp_token_path,
         };
         std::thread::Builder::new()
             .name("worker".into())
@@ -324,6 +508,48 @@ async fn handle(ctx: Ctx, cmd: Cmd) {
             }
         }
         Cmd::Preview(track) => preview(&ctx, track).await,
+        Cmd::SpotifyRestore(cfg) => {
+            let Some(tokens) = auth::load_tokens(&ctx.sp_token_path) else { return };
+            let client = Arc::new(SpotifyClient::new(cfg, tokens, Some(ctx.sp_token_path.clone())));
+            match client.me().await {
+                Ok(user) => {
+                    *ctx.spotify.write().await = Some(client);
+                    ctx.emit(Event::SpotifyLoggedIn(user));
+                }
+                Err(e) => {
+                    tracing::info!("stored Spotify session not usable: {e}");
+                    ctx.spotify_failed(&e).await;
+                }
+            }
+        }
+        Cmd::SpotifyLogin(cfg, job) => {
+            let r = async {
+                let tokens = browser_login(&ctx, &cfg, &job, Event::SpotifyLoginStarted).await?;
+                if let Err(e) = auth::save_tokens(&ctx.sp_token_path, &tokens) {
+                    tracing::warn!("could not save Spotify tokens: {e}");
+                }
+                let client = Arc::new(SpotifyClient::new(cfg, tokens, Some(ctx.sp_token_path.clone())));
+                let user = client.me().await?;
+                *ctx.spotify.write().await = Some(client);
+                Ok::<_, ApiError>(user)
+            }
+            .await;
+            ctx.emit(Event::JobDone { job: job.id, note: None });
+            match r {
+                Ok(user) => {
+                    ctx.emit(Event::SpotifyLoggedIn(user));
+                    sp_load_playlists(&ctx).await;
+                }
+                Err(ApiError::Cancelled) => ctx.emit(Event::SpotifyLoggedOut { expired: false }),
+                Err(e) => ctx.emit(Event::SpotifyLoginFailed(err_text(&e))),
+            }
+        }
+        Cmd::SpotifyLogout => {
+            *ctx.spotify.write().await = None;
+            let _ = std::fs::remove_file(&ctx.sp_token_path);
+            ctx.emit(Event::SpotifyLoggedOut { expired: false });
+        }
+        Cmd::SpotifyLoadPlaylists => sp_load_playlists(&ctx).await,
         job_cmd => run_job(&ctx, job_cmd).await,
     }
 }
@@ -342,10 +568,17 @@ async fn run_job(ctx: &Ctx, cmd: Cmd) {
         | Cmd::FindReplacements { job, .. }
         | Cmd::Replace { job, .. }
         | Cmd::Match { job, .. }
-        | Cmd::FetchForExport { job, .. } => job.clone(),
+        | Cmd::FetchForExport { job, .. }
+        | Cmd::FromSpotify { job, .. }
+        | Cmd::ToSpotify { job, .. }
+        | Cmd::SpotifyWrite { job, .. } => job.clone(),
         _ => return,
     };
+    let spotify_job = matches!(cmd, Cmd::FromSpotify { .. } | Cmd::ToSpotify { .. } | Cmd::SpotifyWrite { .. });
     let result = job_body(ctx, cmd, &job).await;
+    if spotify_job && let Err(e) = &result {
+        ctx.spotify_failed(e).await;
+    }
     match result {
         Ok(note) => ctx.emit(Event::JobDone { job: job.id, note }),
         Err(e) => ctx.emit(Event::JobFailed { job: job.id, error: err_text(&e) }),
@@ -353,8 +586,22 @@ async fn run_job(ctx: &Ctx, cmd: Cmd) {
 }
 
 async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiError> {
-    let c = ctx.client().await?;
     let cancel = || job.cancelled();
+    // Writing to Spotify does not need the TIDAL session.
+    let cmd = match cmd {
+        Cmd::SpotifyWrite { name, description, public, target, ids, .. } => {
+            let sp = ctx.spotify().await?;
+            let pid = match target {
+                Some(t) => t,
+                None => sp.create_playlist(&name, &description, public).await?.id,
+            };
+            sp.add_tracks(&pid, &ids, &ctx.progress(job, ids.len()), &cancel).await?;
+            sp_load_playlists(ctx).await;
+            return Ok(Some(Note::SpotifyWritten { name, n: ids.len() }));
+        }
+        other => other,
+    };
+    let c = ctx.client().await?;
     match cmd {
         Cmd::CreatePlaylist { name, description, access, add, .. } => {
             let _g = ctx.write_lock.lock().await;
@@ -533,7 +780,7 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
                 let n = p.rows.len();
                 let b = base;
                 let rows = matcher::match_rows(
-                    &c,
+                    &*c,
                     p.rows.clone(),
                     &|d| ctx.emit(Event::Progress { job: job.id, done: b + d, total }),
                     &cancel,
@@ -542,7 +789,61 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
                 base += n;
                 out.push((p, rows));
             }
-            ctx.emit(Event::Matches(out));
+            ctx.emit(Event::Matches { dest: Dest::Tidal, playlists: out });
+            Ok(None)
+        }
+        Cmd::FromSpotify { playlists, .. } => {
+            let sp = ctx.spotify().await?;
+            let mut sources = Vec::new();
+            let mut skipped = 0;
+            for p in &playlists {
+                let items = sp.playlist_tracks(p, &cancel).await?;
+                skipped += items.skipped;
+                sources.push(ImportPlaylist {
+                    name: p.name.clone(),
+                    description: p.description.clone(),
+                    access_type: if p.public { AccessType::Public } else { AccessType::Unlisted },
+                    // Spotify ids mean nothing to TIDAL: match by ISRC, then artist + title.
+                    rows: items.tracks.iter().map(|t| row_from_track(t, false)).collect(),
+                    exact: false,
+                });
+            }
+            if skipped > 0 {
+                ctx.emit(Event::Note(Note::Skipped(skipped)));
+            }
+            let out = match_all(ctx, &*c, sources, job).await?;
+            ctx.emit(Event::Matches { dest: Dest::Tidal, playlists: out });
+            Ok(None)
+        }
+        Cmd::ToSpotify { playlists, known, .. } => {
+            let sp = ctx.spotify().await?;
+            let mut sources = Vec::new();
+            let mut skipped = 0;
+            for p in &playlists {
+                let items = c.playlist_items(&p.id, &cancel).await?;
+                ctx.emit(Event::Items { pid: p.id.clone(), items: items.clone() });
+                let mut rows = Vec::new();
+                for it in &items {
+                    match it.track.as_ref().or_else(|| known.get(&it.r.id)) {
+                        Some(t) if t.kind == crate::api::ItemKind::Track && !t.title.is_empty() => {
+                            rows.push(row_from_track(t, false));
+                        }
+                        _ => skipped += 1,
+                    }
+                }
+                sources.push(ImportPlaylist {
+                    name: p.name.clone(),
+                    description: p.description.clone(),
+                    access_type: p.access_type,
+                    rows,
+                    exact: false,
+                });
+            }
+            if skipped > 0 {
+                ctx.emit(Event::Note(Note::Skipped(skipped)));
+            }
+            let out = match_all(ctx, &*sp, sources, job).await?;
+            ctx.emit(Event::Matches { dest: Dest::Spotify, playlists: out });
             Ok(None)
         }
         Cmd::FetchForExport { playlists, format, dir, backup, .. } => {
@@ -664,10 +965,64 @@ async fn restore(ctx: &Ctx, c: &Client, pid: &str, target: &[ItemRef], job: &Job
     Ok(())
 }
 
-async fn login(ctx: &Ctx, cfg: AuthConfig, job: &Job) -> Result<(), ApiError> {
+/// Builds a match row from a known track (Spotify or TIDAL metadata).
+fn row_from_track(t: &Track, keep_id: bool) -> crate::ops::files::ImportRow {
+    crate::ops::files::ImportRow {
+        kind: crate::api::ItemKind::Track,
+        id: keep_id.then(|| t.id.clone()),
+        isrc: t.isrc.clone(),
+        title: t.full_title(),
+        artists: t.artists.clone(),
+        album: t.album.clone(),
+        duration_secs: (t.duration_secs > 0).then_some(t.duration_secs),
+    }
+}
+
+async fn match_all<C: matcher::Catalog>(
+    ctx: &Ctx,
+    catalog: &C,
+    sources: Vec<ImportPlaylist>,
+    job: &Job,
+) -> Result<Vec<(ImportPlaylist, Vec<MatchRow>)>, ApiError> {
+    let total: usize = sources.iter().map(|p| p.rows.len()).sum();
+    let mut out = Vec::new();
+    let mut base = 0;
+    for p in sources {
+        let b = base;
+        let rows = matcher::match_rows(
+            catalog,
+            p.rows.clone(),
+            &|d| ctx.emit(Event::Progress { job: job.id, done: b + d, total }),
+            &|| job.cancelled(),
+        )
+        .await?;
+        base += p.rows.len();
+        out.push((p, rows));
+    }
+    Ok(out)
+}
+
+async fn sp_load_playlists(ctx: &Ctx) {
+    let r = async { ctx.spotify().await?.playlists().await }.await;
+    match r {
+        Ok(p) => ctx.emit(Event::SpotifyPlaylists(p)),
+        Err(e) => {
+            ctx.spotify_failed(&e).await;
+            ctx.emit(Event::Error(err_text(&e)));
+        }
+    }
+}
+
+/// PKCE in the system browser with a loopback redirect; returns fresh tokens.
+async fn browser_login(
+    ctx: &Ctx,
+    cfg: &AuthConfig,
+    job: &Job,
+    started: fn(String) -> Event,
+) -> Result<auth::TokenSet, ApiError> {
     let pkce = auth::Pkce::new();
-    let url = auth::authorize_url(&cfg, &pkce);
-    ctx.emit(Event::LoginStarted(url.clone()));
+    let url = auth::authorize_url(cfg, &pkce);
+    ctx.emit(started(url.clone()));
     if let Err(e) = open::that_detached(&url) {
         tracing::warn!("could not open browser: {e}");
     }
@@ -675,8 +1030,11 @@ async fn login(ctx: &Ctx, cfg: AuthConfig, job: &Job) -> Result<(), ApiError> {
     let code = tokio::task::spawn_blocking(move || auth::wait_for_code(&cfg2, &state, cancel))
         .await
         .map_err(|e| ApiError::Other(e.to_string()))??;
-    let http = Client::http();
-    let tokens = auth::exchange_code(&http, &cfg, &code, &pkce.verifier).await?;
+    auth::exchange_code(&Client::http(), cfg, &code, &pkce.verifier).await
+}
+
+async fn login(ctx: &Ctx, cfg: AuthConfig, job: &Job) -> Result<(), ApiError> {
+    let tokens = browser_login(ctx, &cfg, job, Event::LoginStarted).await?;
     if let Err(e) = auth::save_tokens(&ctx.token_path, &tokens) {
         tracing::warn!("could not save tokens: {e}");
     }
