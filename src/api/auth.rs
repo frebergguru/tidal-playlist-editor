@@ -21,8 +21,7 @@ pub const SPOTIFY_TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
 pub const SPOTIFY_SCOPES: &str = "playlist-read-private playlist-read-collaborative playlist-modify-private playlist-modify-public user-library-read";
 
 /// Third-party scopes this app uses (see `components.securitySchemes` in the spec).
-pub const SCOPES: &str =
-    "user.read collection.read collection.write playlists.read playlists.write search.read playback";
+pub const SCOPES: &str = "user.read collection.read collection.write playlists.read playlists.write search.read playback recommendations.read";
 
 #[derive(Clone, Debug)]
 pub struct AuthConfig {

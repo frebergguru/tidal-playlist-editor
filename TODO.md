@@ -20,15 +20,10 @@ for third-party apps (genres did), so check each one against the live API before
       there is no way to list a user's folders (`/userCollectionFolders` needs `filter[id]`,
       `/userCollectionFolders/me` is 404, and `/userCollectionPlaylists/me` lists only playlists).
       Needs an account with a folder to see where folder ids show up.
-- [ ] **Playlist cover image.** Flow in the spec: `POST /artworks` with `mediaType: IMAGE` and
-      `sourceFile {md5Hash, size ≤ 20 MB}` → upload the bytes to `sourceFile.uploadLink`
-      (its own method and headers; a presigned link, so no bearer token) → `PATCH
-      /playlists/{id}/relationships/coverArt` with `[{type: artworks, id}]` (empty clears it).
-      `POST /artworks` lists the `w_usr` scope, which the app does not ask for today. Needs an MD5
-      crate and a live write test before building.
-- [ ] **Save Daily / Discovery / New release mixes.** Not possible now: they need the
-      `recommendations.read` scope, and there is no endpoint that lists a user's mix ids.
-      (Song and artist radio are done.)
+- [ ] **Save Daily / Discovery / New release mixes.** They need the `recommendations.read`
+      scope, which the login now asks for (from 0.2.0+; log out and in again to get it). Still to
+      find out with such a token: where a user's mix ids come from (`/userDailyMixes/me` was 404
+      without the scope).
 
 ## Done
 
@@ -40,6 +35,8 @@ for third-party apps (genres did), so check each one against the live API before
 - Song and artist radio saved as a playlist.
 - Where is this song, and duplicates across playlists.
 - Trim to a length; popularity sort; song and video counts in the sidebar.
+- Playlist cover image: not possible. `POST /artworks` needs the `w_usr` scope, which the
+  spec marks INTERNAL (not available to third-party apps).
 - Checked live: `bpm`, `key`, `keyScale` and `toneTags` are not returned at all for
   third-party apps, so sorting by tempo or key is not possible. `popularity` is filled in.
 

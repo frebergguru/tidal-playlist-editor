@@ -53,7 +53,7 @@ Tracks with DRM cannot be played here and open in the TIDAL app instead.
 2. Create an app.
 3. Add the redirect URI `http://localhost:8765/callback` (it must match the setting in the app exactly).
 4. Give the app these scopes:
-   `user.read collection.read collection.write playlists.read playlists.write search.read playback`.
+   `user.read collection.read collection.write playlists.read playlists.write search.read playback recommendations.read`.
 5. Start TIDAL Playlist Editor, open **API settings…**, paste the **Client ID** and save.
    A client secret is not needed (the app uses PKCE).
 6. Press **Log in with TIDAL** and log in in the browser. The app continues by itself; there is no time limit.
@@ -172,7 +172,7 @@ høyere tilgangsnivå, spiller den samme koden hele sporet. Spor med DRM kan ikk
 2. Lag en app.
 3. Legg til omdirigerings-URI-en `http://localhost:8765/callback` (den må være lik innstillingen i programmet).
 4. Gi appen disse tilgangene:
-   `user.read collection.read collection.write playlists.read playlists.write search.read playback`.
+   `user.read collection.read collection.write playlists.read playlists.write search.read playback recommendations.read`.
 5. Start programmet, åpne **API-innstillinger …**, lim inn **Client ID** og lagre. Du trenger ikke klienthemmelighet.
 6. Trykk **Logg inn med TIDAL** og logg inn i nettleseren. Programmet fortsetter av seg selv; det er ingen tidsgrense.
 
