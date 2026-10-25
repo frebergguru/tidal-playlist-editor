@@ -20,7 +20,7 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt                              # rustfmt.toml: max_width 120
 cargo test screenshots -- --ignored    # renders target/screens/*.png, no window
 cargo test emoji_screenshot -- --ignored
-./release.sh                           # Linux + Windows packages in dist/<version>/
+./release.sh                           # Linux tar.gz + AppImage, Windows zip in dist/<version>/
 ```
 
 - Every change must leave `cargo test` and `cargo clippy --all-targets -- -D warnings` clean;
@@ -44,7 +44,7 @@ cargo test emoji_screenshot -- --ignored
 | `src/ui/tests.rs` | Headless UI tests through the AccessKit tree |
 | `src/i18n.rs` | Every UI string, English and Norwegian |
 | `src/store.rs` | Config, token files, track cache |
-| `tools/` | `fetch-assets.sh` (fonts, SHA-256 pinned), `gen-notice.py` (NOTICE), `gen-icons.sh` (icon PNG/ICO) |
+| `tools/` | `fetch-assets.sh` (fonts, SHA-256 pinned), `gen-notice.py` (NOTICE), `gen-icons.sh` (icon PNG/ICO), `fetch-appimage.sh` (AppImage runtime, its source and licences, SHA-256 pinned, into `target/appimage/`) |
 | `packaging/` | `.desktop` file; the app icon: `icon.svg` (our own design) and the `icon.png`/`icon.ico` rendered from it (committed; window icon, Linux package, Windows `.exe` resource via `windres` in `build.rs`) |
 | `release.sh`, `check-stripped.sh` | Release build and the strip check |
 
@@ -103,5 +103,11 @@ cargo test emoji_screenshot -- --ignored
   symbols) and checks that the Windows `.exe` needs no MinGW runtime DLLs. Do not
   weaken these checks. `NOTICE` (generated) must list every crate and bundled font with
   its licence text.
+- **AppImage:** the type2 runtime it starts with is third-party and links in libfuse
+  (LGPL-2.1). `release.sh` checks the runtime is stripped, puts the runtime's licences
+  in the AppImage's `NOTICE` (`gen-notice.py --appimage`), and ships its complete
+  source (`appimage-runtime-source-<tag>.tar.gz`) next to the AppImage. Publish that
+  file with every AppImage. Moving to another runtime tag means new pins in
+  `tools/fetch-appimage.sh` and the libfuse version its build script uses.
 - **Commits:** small, with a message explaining why. The repository identity is
   "TIDAL Playlist Editor" with the GitHub no-reply address.

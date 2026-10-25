@@ -3,6 +3,9 @@
 (Linux and Windows), with its licence texts, plus the bundled fonts.
 
 Usage: python3 -I tools/gen-notice.py > NOTICE   (run from the repo root)
+       python3 -I tools/gen-notice.py --appimage target/appimage > NOTICE-appimage
+With --appimage, also the AppImage runtime and the libraries it links in
+(licence texts fetched by tools/fetch-appimage.sh).
 """
 import json, os, subprocess, sys
 
@@ -111,3 +114,24 @@ SOFTWARE.
 for spdx in ["Apache-2.0", "BSL-1.0", "MPL-2.0"]:
     with open(f"/usr/share/licenses/spdx/{spdx}.txt", encoding="utf-8") as fh:
         w(f"\n[{spdx}]\n" + fh.read().strip() + "\n")
+
+if "--appimage" in sys.argv:
+    d = os.path.join(sys.argv[sys.argv.index("--appimage") + 1], "licences")
+    w("\n\n" + "=" * 72 + "\n")
+    w("AppImage runtime\n")
+    w("=" * 72 + "\n")
+    w("The AppImage starts with the AppImage type2 runtime (tag 20251108,\n"
+      "https://github.com/AppImage/type2-runtime), which statically links musl libc,\n"
+      "libfuse 3.15.0 (LGPL-2.1, with the runtime's patch), squashfuse, zstd and zlib.\n"
+      "Their complete corresponding source is published next to every AppImage as\n"
+      "appimage-runtime-source-20251108.tar.gz: the runtime's source at that tag (its\n"
+      "libfuse patch and build scripts included, which rebuild and relink it) and the\n"
+      "libfuse 3.15.0 release tarball. The runtime is used without modification.\n")
+    for name, f in [("AppImage type2 runtime (MIT)", "type2-runtime-LICENSE"),
+                    ("libfuse (LGPL-2.1)", "libfuse-LGPL2.txt"),
+                    ("musl libc (MIT)", "musl-COPYRIGHT"),
+                    ("squashfuse (BSD-2-Clause)", "squashfuse-LICENSE"),
+                    ("zstd (BSD-3-Clause)", "zstd-LICENSE"),
+                    ("zlib (Zlib)", "zlib-LICENSE")]:
+        with open(os.path.join(d, f), encoding="utf-8", errors="replace") as fh:
+            w(f"\n{name}\n\n" + fh.read().strip() + "\n")

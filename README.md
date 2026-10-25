@@ -103,10 +103,10 @@ rustup toolchain install 1.99.1            # pinned in rust-toolchain.toml
 cargo run --release                        # Linux
 cargo test                                 # unit, API mock and headless UI tests
 cargo test screenshots -- --ignored        # renders target/screens/*.png without a window
-./release.sh                               # Linux + Windows packages in dist/<version>/
+./release.sh                               # Linux tar.gz + AppImage, Windows zip in dist/<version>/
 ```
 
-`release.sh` runs the tests and clippy, and builds both targets. It then checks with `check-stripped.sh` that every shipped binary is stripped, and stops the release if one is not.
+`release.sh` runs the tests and clippy, and builds both targets and the AppImage (`appimagetool`, with the runtime fetched and pinned by `tools/fetch-appimage.sh`; the runtime's source is shipped next to the AppImage, as its LGPL-2.1 part requires). It then checks with `check-stripped.sh` that every shipped binary is stripped, and stops the release if one is not.
 Windows is cross-compiled with MinGW (`x86_64-pc-windows-gnu`); `build.rs` puts the app icon into the `.exe` with MinGW's `windres`.
 On Linux the app adds itself to the application menu when it starts (a `.desktop` file and the icon in
 `~/.local/share`, pointing at wherever the program is). On Wayland this is also what gives the window

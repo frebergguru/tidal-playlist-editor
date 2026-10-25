@@ -71,6 +71,46 @@ with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z:
 echo "== strip check (archives)"
 ./check-stripped.sh "$OUT/$NAME-$VERSION-linux-x86_64.tar.gz" "$OUT/$NAME-$VERSION-windows-x86_64.zip"
 
-(cd "$OUT" && sha256sum ./*.tar.gz ./*.zip > SHA256SUMS)
+echo "== AppImage"
+# The runtime is third-party (MIT, with LGPL-2.1 libfuse linked in): fetched
+# pinned, checked for symbols like our own binaries, and its corresponding
+# source is published next to the AppImage.
+tools/fetch-appimage.sh
+python3 -I tools/gen-notice.py --appimage target/appimage > NOTICE-appimage
+APPDIR=target/appimage/AppDir
+rm -rf "$APPDIR"
+mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" "$APPDIR/usr/share/icons/hicolor/256x256/apps" \
+    "$APPDIR/usr/share/doc/$NAME"
+install -m 755 target/release/tidal-editor "$APPDIR/usr/bin/$NAME"
+install -m 644 packaging/$NAME.desktop "$APPDIR/$NAME.desktop"
+install -m 644 packaging/$NAME.desktop "$APPDIR/usr/share/applications/"
+install -m 644 packaging/icon.png "$APPDIR/$NAME.png"
+install -m 644 packaging/icon.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/$NAME.png"
+ln -s "$NAME.png" "$APPDIR/.DirIcon"
+ln -s "usr/bin/$NAME" "$APPDIR/AppRun"
+install -m 644 README.md LICENSE "$APPDIR/usr/share/doc/$NAME/"
+install -m 644 NOTICE-appimage "$APPDIR/usr/share/doc/$NAME/NOTICE"
+echo "== strip check (AppImage contents and runtime)"
+./check-stripped.sh "$APPDIR" target/appimage/runtime-x86_64
+APPIMAGE="$OUT/$NAME-$VERSION-x86_64.AppImage"
+ARCH=x86_64 appimagetool --no-appstream --runtime-file target/appimage/runtime-x86_64 "$APPDIR" "$APPIMAGE"
+./check-stripped.sh "$APPIMAGE"
+# The runtime's complete corresponding source (LGPL-2.1 for libfuse).
+cat > target/appimage/source/README.txt <<'TXT'
+Source code of the AppImage runtime used by TIDAL Playlist Editor's AppImage.
+
+type2-runtime-20251108.tar.gz  The AppImage type2 runtime at tag 20251108
+                               (https://github.com/AppImage/type2-runtime), with
+                               the libfuse patch and the build scripts that build
+                               and link the runtime (see BUILD.md inside).
+fuse-3.15.0.tar.xz             libfuse 3.15.0 (LGPL-2.1), the exact release the
+                               runtime's build script uses (same SHA-256).
+
+The runtime is used unmodified. Licences: see NOTICE inside the AppImage
+(usr/share/doc/tidal-playlist-editor/NOTICE).
+TXT
+tar -C target/appimage -czf "$OUT/appimage-runtime-source-20251108.tar.gz" source
+
+(cd "$OUT" && sha256sum ./*.tar.gz ./*.zip ./*.AppImage > SHA256SUMS)
 echo "== done: $OUT"
 ls -la "$OUT"
