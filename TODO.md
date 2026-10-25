@@ -14,16 +14,6 @@ for third-party apps (genres did), so check each one against the live API before
       add recommendations, upgrade sound quality, swap clean versions, save a radio,
       remove copies across playlists, trim, on a real account.
 
-## New features
-
-- [ ] **Playlist folders.** Checked live with a real folder: only its id can be reached.
-      `/userCollectionPlaylists/me/relationships/items?collectionView=FOLDERS` lists the folder as a
-      `userCollectionFolders` item (its playlists then leave the top level), but the folder itself
-      gives nothing: `/userCollectionFolders/{id}` is 404; its `relationships/items`,
-      `/userCollectionFolders?filter[id]=`, `/folders?filter[id]=` and `/folderItems?filter[parent.id]=`
-      are all empty; and no include returns the folder resource. No name, no contents: not
-      buildable until TIDAL opens this up.
-
 ## Done
 
 - Release 0.2.0 built (`dist/0.2.0/`, stripped, tests and clippy clean).
