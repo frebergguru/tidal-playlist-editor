@@ -7,42 +7,43 @@ for third-party apps (genres did), so check each one against the live API before
 ## Finish what exists
 
 - [ ] **New release.** The packages in `dist/0.1.0/` predate recommendations, the genre
-      generator, colour emoji and Find videos. Run `release.sh`.
+      generator, colour emoji, Find videos, sound quality, clean versions, radio, songs across
+      playlists and trim. Run `release.sh`.
 - [ ] **Windows test.** Colour emoji (Segoe UI Emoji, COLR) and the system font lookup
       (`egui_system_font_provider`, DirectWrite) compile for Windows but have not been seen running there.
 - [ ] **Screen reader check of the running app** (AT-SPI on Linux). The headless tests
       cover names through AccessKit, but the live window has not been checked.
 - [ ] **Live test of writing features:** generate a playlist, swap videos for songs,
-      add recommendations, on a real account.
+      add recommendations, upgrade sound quality, swap clean versions, save a radio,
+      remove copies across playlists, trim, on a real account.
 
 ## New features
 
-- [ ] **Upgrade sound quality:** find songs that have a better version (HiRes, lossless,
-      Dolby Atmos; `mediaTags` on tracks) and swap them in place. Same flow as
-      Find videos / Find replacements: find, review with preview, replace in place.
-- [ ] **Clean versions:** list explicit songs (`explicit`), and swap them for the clean
-      version or remove them.
-- [ ] **Save a mix or radio as a playlist:** copy Daily / Discovery / New release mixes
-      (`/userDailyMixes/{id}/relationships/items` and friends) before they change, and make
-      a playlist from a song's or artist's radio (`/tracks/{id}/relationships/radio`,
-      `/artists/{id}/relationships/radio`).
-- [ ] **Playlist folders:** show and organise playlists in folders
-      (`/userCollectionFolders`, `/folders`, `/folderItems`).
-- [ ] **Playlist cover image:** set a cover from the app (`/playlists/{id}/relationships/coverArt`,
-      `/artworks`).
-- [ ] **Where is this song?** Show every playlist that contains a song, and find duplicates
-      across playlists, not only within one.
+- [ ] **Playlist folders** (`/userCollectionFolders`, `/folders`, `/folderItems`). Checked live:
+      there is no way to list a user's folders (`/userCollectionFolders` needs `filter[id]`,
+      `/userCollectionFolders/me` is 404, and `/userCollectionPlaylists/me` lists only playlists).
+      Needs an account with a folder to see where folder ids show up.
+- [ ] **Playlist cover image.** Flow in the spec: `POST /artworks` with `mediaType: IMAGE` and
+      `sourceFile {md5Hash, size ≤ 20 MB}` → upload the bytes to `sourceFile.uploadLink`
+      (its own method and headers; a presigned link, so no bearer token) → `PATCH
+      /playlists/{id}/relationships/coverArt` with `[{type: artworks, id}]` (empty clears it).
+      `POST /artworks` lists the `w_usr` scope, which the app does not ask for today. Needs an MD5
+      crate and a live write test before building.
+- [ ] **Save Daily / Discovery / New release mixes.** Not possible now: they need the
+      `recommendations.read` scope, and there is no endpoint that lists a user's mix ids.
+      (Song and artist radio are done.)
 
-## Sorting and filtering (check the data first)
+## Done
 
-- [ ] Sort or build playlists by **tempo** (`bpm`), **musical key** (`key`, `keyScale`) or
-      **popularity** (`popularity`). Check with a real login that these are filled in for
-      third-party apps before building on them.
-
-## Smaller things
-
-- [ ] **Trim to a length:** for example "make this playlist about 1 hour".
-- [ ] **Song and video counts in the sidebar** (`numberOfTrackItems`, `numberOfVideoItems`).
+- Upgrade sound quality (same ISRC; Hi-Res, lossless, optionally Dolby Atmos).
+  Note: `/tracks?filter[isrc]=` with several ISRCs returns only one track per ISRC, so the
+  lookup is one ISRC per request.
+- Clean versions of explicit songs (swap or remove).
+- Song and artist radio saved as a playlist.
+- Where is this song, and duplicates across playlists.
+- Trim to a length; popularity sort; song and video counts in the sidebar.
+- Checked live: `bpm`, `key`, `keyScale` and `toneTags` are not returned at all for
+  third-party apps, so sorting by tempo or key is not possible. `popularity` is filled in.
 
 ## Known limitations
 
