@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=TIDAL Playlist Editor
+Name[nb]=TIDAL spillelisteredigering
+Comment=Edit, import, export and clean up your TIDAL playlists
+Comment[nb]=Rediger, importer, eksporter og rydd i TIDAL-spillelistene dine
+Exec=tidal-playlist-editor
+Icon=audio-x-generic
+Terminal=false
+Categories=AudioVideo;Audio;Music;
+StartupWMClass=tidal-playlist-editor

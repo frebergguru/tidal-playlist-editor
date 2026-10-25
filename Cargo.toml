@@ -1,0 +1,46 @@
+[package]
+name = "tidal-editor"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "Desktop playlist editor for TIDAL (official TIDAL API v2)"
+license = "MIT"
+publish = false
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+egui = "0.37"
+egui_extras = "0.37"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "query", "form", "http2", "charset"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "time", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tiny_http = "0.12"
+csv = "1.4"
+quick-xml = "0.42"
+rodio = { version = "0.23", default-features = false, features = ["playback", "symphonia-aac", "symphonia-isomp4", "symphonia-flac"] }
+open = "5.4"
+directories = "6"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sha2 = "0.11"
+base64 = "0.23"
+url = "2.5"
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal", "pollster"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+strsim = "0.11"
+toml = "1.1"
+sys-locale = "0.3"
+uuid = { version = "1.29", features = ["v4"] }
+
+[dev-dependencies]
+wiremock = "0.6"
+egui_kittest = { version = "0.37", features = ["eframe", "wgpu", "snapshot"] }
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 4
