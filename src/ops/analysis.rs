@@ -227,7 +227,7 @@ pub fn sorted(items: &[PlaylistItem], key: SortKey, ascending: bool) -> Vec<Play
 }
 
 /// Deterministic-per-call shuffle without pulling in a RNG crate.
-pub fn shuffled(items: &[PlaylistItem]) -> Vec<PlaylistItem> {
+pub fn shuffled<T: Clone>(items: &[T]) -> Vec<T> {
     let mut v = items.to_vec();
     let mut seed = u128::from_le_bytes(*uuid::Uuid::new_v4().as_bytes());
     for i in (1..v.len()).rev() {

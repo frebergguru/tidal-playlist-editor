@@ -23,6 +23,7 @@ enum RowAction {
     CopyTo(Vec<ItemRef>),
     MoveTo(HashSet<String>),
     Favourite(Vec<String>),
+    Similar(HashSet<String>),
     CopyLink(usize),
 }
 
@@ -206,6 +207,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 actions.push(RowAction::Favourite(
                     refs.iter().filter(|r| r.kind == crate::api::ItemKind::Track).map(|r| r.id.clone()).collect(),
                 ));
+            }
+            if ui.add_enabled(any, egui::Button::new(tr.similar_songs_dots)).clicked() {
+                actions.push(RowAction::Similar(target_ids.clone()));
             }
             if ui.add(egui::Button::new(tr.select_all).shortcut_text("Ctrl+A")).clicked()
                 && let Some(items) = app.items.get(&pid)
@@ -546,6 +550,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                     .collect(),
                             ));
                         }
+                        if ui.button(tr.similar_songs_dots).clicked() {
+                            actions.push(RowAction::Similar(ids.clone()));
+                        }
                         if ui.button(tr.remove).clicked() {
                             actions.push(RowAction::Remove(ids));
                         }
@@ -668,6 +675,7 @@ fn run_action(app: &mut App, pid: &str, a: RowAction, vis: &[usize]) {
             app.open_dialog(Dialog::add_to(refs, Some(pid.to_owned()), Some(ids)));
         }
         RowAction::Favourite(ids) => app.worker.send(Cmd::Favourite { ids, add: true }),
+        RowAction::Similar(ids) => app.recommend(pid, ids, &[]),
     }
 }
 

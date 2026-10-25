@@ -203,6 +203,38 @@ fn screenshots() {
     }
     h.run();
     h.render().unwrap().save(dir.join("main-light-160.png")).unwrap();
+    {
+        let app = h.state_mut();
+        let recs = (60..72)
+            .map(|n| crate::ops::recommend::Recommendation {
+                track: item(n, &format!("Suggested song {n}"), true).track.unwrap(),
+                seeds: 1 + n % 3,
+            })
+            .collect();
+        app.open_dialog(super::Dialog::recommend("p1".into(), recs, Default::default()));
+    }
+    h.run();
+    h.render().unwrap().save(dir.join("recommend-160.png")).unwrap();
+    h.key_press(Key::Escape);
+    h.run();
+    {
+        let app = h.state_mut();
+        let names = ["Pop", "Rock", "Jazz", "Hip-hop", "Classical", "Electronic", "Country", "Metal", "Blues", "Folk"];
+        app.genres = Some(Ok(names
+            .iter()
+            .enumerate()
+            .map(|(n, g)| crate::api::Genre { id: n.to_string(), name: (*g).into() })
+            .collect()));
+        app.open_dialog(super::Dialog::generate());
+    }
+    h.run();
+    h.get_by_label("Rock").click();
+    h.run();
+    h.get_by_label("Jazz").click();
+    h.run();
+    h.render().unwrap().save(dir.join("generate-160.png")).unwrap();
+    h.key_press(Key::Escape);
+    h.run();
     h.state_mut().set_text_scale(&ctx, 1.0);
     let app = h.state_mut();
     app.cfg.theme = crate::store::ThemeChoice::System;
@@ -439,4 +471,58 @@ fn duplicates_dialog_follows_rows_not_positions() {
     assert_eq!(remove.len(), 1);
     // After the reverse, "occ1b" comes first and is the one kept; "occ1" is removed.
     assert!(remove.contains("occ1"), "{remove:?}");
+}
+
+#[test]
+fn recommendations_are_added_to_the_playlist() {
+    use crate::ops::recommend::Recommendation;
+    let mut h = harness();
+    logged_in(&mut h);
+    {
+        let rec = |id: &str, title: &str, seeds| Recommendation {
+            track: Track { id: id.into(), title: title.into(), artists: vec!["New".into()], ..Default::default() },
+            seeds,
+        };
+        let recs = vec![rec("50", "Fresh one", 3), rec("51", "Fresh two", 1)];
+        h.state_mut().open_dialog(super::Dialog::recommend("p1".into(), recs, Default::default()));
+    }
+    h.run();
+    h.get_by_label_contains("Songs like those in «Road trip»");
+    // Every row has a labelled preview button and a checkbox that says why it was suggested.
+    h.get_by_label("Play preview: Fresh one — New");
+    h.get_by_label_contains("Fresh one — New · suggested by 3 of your songs").click();
+    h.run();
+    h.get_by_label("Add 1 to the playlist").click();
+    h.run();
+    assert!(h.state().dialog.is_none());
+    assert_eq!(h.state().undo["p1"].len(), 1, "undoable");
+    wait_for_log(&mut h, "Adding 1 to Road trip");
+}
+
+#[test]
+fn generate_dialog_needs_a_genre() {
+    let mut h = harness();
+    logged_in(&mut h);
+    {
+        let app = h.state_mut();
+        app.genres = Some(Ok(vec![
+            crate::api::Genre { id: "g1".into(), name: "Pop".into() },
+            crate::api::Genre { id: "g2".into(), name: "Jazz".into() },
+        ]));
+        app.open_dialog(super::Dialog::generate());
+    }
+    h.run();
+    assert!(h.get_by_label("Generate").accesskit_node().is_disabled(), "disabled until a genre is chosen");
+    h.get_by_label("Pop").click();
+    h.run();
+    h.get_by_label("Jazz").click();
+    h.run();
+    // With two genres the user chooses one mixed playlist or one per genre.
+    h.get_by_label("One playlist per genre").click();
+    h.run();
+    h.get_by_label("Songs per playlist");
+    h.get_by_label("Generate").click();
+    h.run();
+    assert!(h.state().dialog.is_none());
+    wait_for_log(&mut h, "Generating playlists: Pop, Jazz");
 }

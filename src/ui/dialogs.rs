@@ -6,11 +6,13 @@ use std::path::{Path, PathBuf};
 use egui::{Key, RichText};
 
 use super::{App, JobKind};
-use crate::api::{AccessType, ItemRef, Playlist, PlaylistItem, Track, format_duration};
+use crate::api::{AccessType, Genre, ItemRef, Playlist, PlaylistItem, Track, format_duration};
 use crate::i18n::{self, Tr};
 use crate::ops::analysis::{self, DupGroup, DupMode, SortKey};
 use crate::ops::files::{self, ExportFormat, ExportPlaylist, ImportPlaylist};
+use crate::ops::generate::MAX_SONGS;
 use crate::ops::matcher::{MatchMethod, MatchRow};
+use crate::ops::recommend::Recommendation;
 use crate::spotify::SpPlaylist;
 use crate::store::{Config, Language, MotionChoice, OpenIn, ThemeChoice};
 use crate::worker::{Cmd, Dest, Reason, UnavailableHit};
@@ -46,6 +48,35 @@ impl UnavailableDialog {
         self.use_repl = repl.iter().map(Option::is_some).collect();
         self.replacements = Some(repl);
     }
+}
+
+pub struct RecommendDialog {
+    pub pid: String,
+    pub recs: Vec<Recommendation>,
+    pub pick: Vec<bool>,
+    /// Item ids the seeds came from; empty = the whole playlist.
+    pub rows: HashSet<String>,
+    /// «Find more» is running; its results are added to the list.
+    pub searching: bool,
+}
+
+impl RecommendDialog {
+    pub fn append(&mut self, recs: Vec<Recommendation>) {
+        self.searching = false;
+        self.pick.extend(std::iter::repeat_n(false, recs.len()));
+        self.recs.extend(recs);
+    }
+}
+
+pub struct GenerateDialog {
+    /// Genre ids, kept in the order TIDAL lists them when sent.
+    pub picked: HashSet<String>,
+    pub find: String,
+    pub count: usize,
+    pub per_genre: bool,
+    /// Empty: named after the genres.
+    pub name: String,
+    pub skip_known: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -117,6 +148,8 @@ pub enum Dialog {
     },
     Stats(String),
     Unavailable(Box<UnavailableDialog>),
+    Recommend(Box<RecommendDialog>),
+    Generate(Box<GenerateDialog>),
     Duplicates {
         pid: String,
         mode: DupMode,
@@ -208,6 +241,20 @@ impl Dialog {
             replacements: None,
             use_repl: vec![false; n],
             searching: false,
+        }))
+    }
+    pub fn recommend(pid: String, recs: Vec<Recommendation>, rows: HashSet<String>) -> Self {
+        let pick = vec![false; recs.len()];
+        Dialog::Recommend(Box::new(RecommendDialog { pid, recs, pick, rows, searching: false }))
+    }
+    pub fn generate() -> Self {
+        Dialog::Generate(Box::new(GenerateDialog {
+            picked: HashSet::new(),
+            find: String::new(),
+            count: 50,
+            per_genre: false,
+            name: String::new(),
+            skip_known: true,
         }))
     }
     pub fn duplicates(app: &App, pid: &str) -> Self {
@@ -550,6 +597,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             if close || esc { Outcome::Close } else { Outcome::Keep }
         }
         Dialog::Unavailable(u) => unavailable(app, ctx, u, first),
+        Dialog::Recommend(r) => recommend(app, ctx, r, first),
+        Dialog::Generate(g) => generate(app, ctx, g, first),
         Dialog::Duplicates { pid, mode, groups, remove, seen } => {
             // The list changed under the dialog (reload, undo): work the groups
             // out again, keeping the user's choices for rows that still exist.
@@ -835,6 +884,177 @@ fn reason_text(tr: &Tr, r: &Reason) -> &'static str {
         Reason::NoUsageRule => tr.reason_no_rule,
         Reason::GeoRestricted => tr.reason_geo,
     }
+}
+
+fn recommend(app: &mut App, ctx: &egui::Context, r: &mut RecommendDialog, first: bool) -> Outcome {
+    let tr = app.tr;
+    let Some(pl) = app.playlist(&r.pid).cloned() else { return Outcome::Close };
+    let mut more = false;
+    let mut play = None;
+    let (esc, (ok, cancel)) = frame(ctx, "recommend", tr.recommended_songs, |ui| {
+        ui.label(if r.rows.is_empty() {
+            i18n::fmt(tr.recommend_from_playlist, &[&pl.name])
+        } else {
+            i18n::fmt(tr.recommend_from_songs, &[&r.rows.len().to_string(), &pl.name])
+        });
+        if !pl.owned {
+            ui.label(RichText::new(format!("⚠ {}", tr.recommend_not_owned)).strong());
+        }
+        ui.horizontal_wrapped(|ui| {
+            if !r.recs.is_empty() {
+                if ui.button(tr.select_all).clicked() {
+                    r.pick.iter_mut().for_each(|p| *p = true);
+                }
+                if ui.button(tr.select_none).clicked() {
+                    r.pick.iter_mut().for_each(|p| *p = false);
+                }
+            }
+            let m = ui.add_enabled(!r.searching, egui::Button::new(tr.find_more));
+            if first {
+                m.request_focus();
+            }
+            more = m.clicked();
+            if r.searching {
+                super::style::busy(ui, app.reduced_motion);
+                ui.label(tr.searching);
+            }
+        });
+        if r.recs.is_empty() {
+            ui.label(tr.no_recommendations);
+        }
+        egui::ScrollArea::vertical().max_height(ui.available_height() - 80.0).show(ui, |ui| {
+            for (n, rec) in r.recs.iter().enumerate() {
+                ui.push_id(n, |ui| {
+                    ui.horizontal(|ui| {
+                        let desc = track_desc(tr, Some(&rec.track), &rec.track.id);
+                        let p = ui.button("▶");
+                        p.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{}: {desc}", tr.play_preview))
+                        });
+                        if p.on_hover_text(tr.play_preview).clicked() {
+                            play = Some(rec.track.clone());
+                        }
+                        let mut text = desc;
+                        if let Some(a) = rec.track.album.as_deref().filter(|a| !a.is_empty()) {
+                            text.push_str(&format!(" ({a})"));
+                        }
+                        if rec.seeds > 1 {
+                            text.push_str(&format!(" · {}", i18n::fmt(tr.suggested_by_n, &[&rec.seeds.to_string()])));
+                        }
+                        ui.checkbox(&mut r.pick[n], text);
+                    });
+                });
+            }
+        });
+        let n = r.pick.iter().filter(|p| **p).count();
+        ok_cancel(ui, tr, &i18n::fmt(tr.add_n_to_playlist, &[&n.to_string()]), n > 0 && pl.owned)
+    });
+    if let Some(t) = play {
+        app.play(&t);
+    }
+    if more {
+        app.recommend(&r.pid, r.rows.clone(), &r.recs);
+        r.searching = app.job_running(&JobKind::Recommend);
+    }
+    if ok {
+        let refs = r.recs.iter().zip(&r.pick).filter(|(_, p)| **p).map(|(rec, _)| rec.track.item_ref()).collect();
+        app.add_to_playlist(&r.pid, refs, true);
+    }
+    if ok || cancel || esc { Outcome::Close } else { Outcome::Keep }
+}
+
+fn generate(app: &mut App, ctx: &egui::Context, g: &mut GenerateDialog, first: bool) -> Outcome {
+    let tr = app.tr;
+    let genres: Option<Result<Vec<Genre>, String>> = app.genres.clone();
+    let mut retry = false;
+    let (esc, (ok, cancel)) = frame(ctx, "generate", tr.generate_playlists, |ui| {
+        ui.label(tr.generate_explain);
+        ui.add_space(4.0);
+        match &genres {
+            None => {
+                ui.horizontal(|ui| {
+                    super::style::busy(ui, app.reduced_motion);
+                    ui.label(tr.loading_genres);
+                });
+            }
+            Some(Err(e)) => {
+                ui.label(RichText::new(format!("⚠ {}: {e}", tr.genres_failed)).strong());
+                retry = ui.button(tr.try_again).clicked();
+            }
+            Some(Ok(list)) => {
+                ui.strong(i18n::fmt(tr.genres_picked_n, &[&g.picked.len().to_string()]));
+                if list.len() > 12 {
+                    labelled_text(ui, tr.filter_genres, &mut g.find, first, false);
+                }
+                let find = g.find.trim().to_lowercase();
+                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for (n, genre) in list.iter().enumerate() {
+                            // Picked genres stay visible while filtering.
+                            let mut on = g.picked.contains(&genre.id);
+                            if !on && !find.is_empty() && !genre.name.to_lowercase().contains(&find) {
+                                continue;
+                            }
+                            let r = ui.checkbox(&mut on, &genre.name);
+                            if first && n == 0 && list.len() <= 12 {
+                                r.request_focus();
+                            }
+                            if r.changed() {
+                                if on {
+                                    g.picked.insert(genre.id.clone());
+                                } else {
+                                    g.picked.remove(&genre.id);
+                                }
+                            }
+                        }
+                    });
+                });
+            }
+        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let per = g.per_genre && g.picked.len() > 1;
+            let l = ui.label(if per { tr.songs_per_playlist } else { tr.number_of_songs });
+            ui.add(egui::DragValue::new(&mut g.count).range(1..=MAX_SONGS)).labelled_by(l.id);
+        });
+        if g.picked.len() > 1 {
+            ui.radio_value(&mut g.per_genre, false, tr.one_mixed_playlist);
+            ui.radio_value(&mut g.per_genre, true, tr.one_playlist_per_genre);
+        }
+        if g.per_genre && g.picked.len() > 1 {
+            ui.label(i18n::fmt(tr.generated_name, &[tr.genre_placeholder]));
+        } else {
+            labelled_text(ui, tr.name_optional, &mut g.name, false, false);
+        }
+        ui.checkbox(&mut g.skip_known, tr.skip_known_songs);
+        ok_cancel(ui, tr, tr.generate, !g.picked.is_empty() && g.count > 0)
+    });
+    if retry {
+        app.genres = None;
+        app.worker.send(Cmd::LoadGenres);
+    }
+    if ok && let Some(Ok(list)) = &genres {
+        let chosen: Vec<Genre> = list.iter().filter(|x| g.picked.contains(&x.id)).cloned().collect();
+        let joined = chosen.iter().map(|x| x.name.as_str()).collect::<Vec<_>>().join(", ");
+        let names = if g.per_genre && chosen.len() > 1 {
+            chosen.iter().map(|x| i18n::fmt(tr.generated_name, &[&x.name])).collect()
+        } else if g.name.trim().is_empty() {
+            vec![i18n::fmt(tr.generated_name, &[&joined])]
+        } else {
+            vec![g.name.trim().to_owned()]
+        };
+        let known = if g.skip_known { app.playlists.clone() } else { Vec::new() };
+        let job = app.start_job(i18n::fmt(tr.generating, &[&joined]), JobKind::Plain);
+        app.worker.send(Cmd::Generate {
+            genres: chosen,
+            count: g.count.clamp(1, MAX_SONGS),
+            names,
+            description: i18n::fmt(tr.generated_description, &[&joined]),
+            known,
+            job,
+        });
+    }
+    if ok || cancel || esc { Outcome::Close } else { Outcome::Keep }
 }
 
 fn unavailable(app: &mut App, ctx: &egui::Context, u: &mut UnavailableDialog, first: bool) -> Outcome {

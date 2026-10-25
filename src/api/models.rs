@@ -219,6 +219,12 @@ pub struct Artist {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct Genre {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct SearchResults {
     pub tracks: Vec<Track>,
     pub tracks_next: Option<String>,

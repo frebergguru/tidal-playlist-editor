@@ -1,6 +1,6 @@
 //! Async TIDAL API v2 client: auth refresh, retries, pagination and batching.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -587,6 +587,84 @@ impl Client {
         Ok(Vec::new())
     }
 
+    /// Tracks TIDAL considers similar to this one (first page, best match first).
+    pub async fn similar_tracks(&self, track_id: &str) -> Result<Vec<Track>> {
+        let path = format!("/tracks/{track_id}/relationships/similarTracks");
+        for inc in ["similarTracks,similarTracks.artists,similarTracks.albums", "similarTracks"] {
+            let query = vec![self.cc(), ("include".into(), inc.into())];
+            match self.get(&path, &query).await {
+                Err(e) if e.status() == Some(400) => continue,
+                // A seed TIDAL no longer has simply gives no suggestions.
+                Err(e) if e.status() == Some(404) => return Ok(Vec::new()),
+                other => return Ok(linked_tracks(&other?)),
+            }
+        }
+        Ok(Vec::new())
+    }
+
+    // --------------------------------------------------------------- genres
+
+    /// The genres TIDAL lets users pick from, named in `locale` (e.g. nb-NO).
+    pub async fn genres(&self, locale: &str) -> Result<Vec<Genre>> {
+        let query = q(&[("filter[id]", "USER_SELECTABLE"), ("locale", locale)]);
+        let doc = self.get_all("/genres", &query, &|| false).await?;
+        Ok(doc
+            .data_array()
+            .iter()
+            .filter_map(|r| Some(Genre { id: jsonapi::str_of(r, "id")?, name: jsonapi::attr_str(r, "genreName")? }))
+            .collect())
+    }
+
+    /// Playlists (mostly TIDAL's own) found by a search, best match first.
+    pub async fn search_playlists(&self, query_text: &str) -> Result<Vec<Playlist>> {
+        let query = vec![
+            ("filter[query]".to_owned(), query_text.to_owned()),
+            self.cc(),
+            ("deviceType".into(), "DESKTOP".into()),
+            ("include".into(), "playlists".into()),
+        ];
+        let doc = self.get("/searchResults", &query).await?;
+        let res = doc.data_array().first().cloned().unwrap_or_else(|| doc.data.clone());
+        Ok(jsonapi::rel_ids(&res, "playlists")
+            .iter()
+            .filter_map(|(t, id)| jsonapi::playlist_from(doc.get(t, id)?))
+            .collect())
+    }
+
+    /// Genre ids per track. Tracks TIDAL gives no genres for are left out.
+    pub async fn track_genres(
+        &self,
+        ids: &[String],
+        cancel: &(dyn Fn() -> bool + Sync),
+    ) -> Result<HashMap<String, Vec<String>>> {
+        let mut out = HashMap::new();
+        for chunk in ids.chunks(FILTER_BATCH) {
+            if cancel() {
+                return Err(ApiError::Cancelled);
+            }
+            let mut query: Query = chunk.iter().map(|id| ("filter[id]".to_owned(), id.clone())).collect();
+            query.push(self.cc());
+            query.push(("includeLinkage".into(), "genres".into()));
+            let doc = match self.get_all("/tracks", &query, cancel).await {
+                // Older servers: ask for the full genre resources instead.
+                Err(e) if e.status() == Some(400) => {
+                    query.pop();
+                    query.push(("include".into(), "genres".into()));
+                    self.get_all("/tracks", &query, cancel).await?
+                }
+                other => other?,
+            };
+            for r in doc.data_array() {
+                let Some(id) = jsonapi::str_of(r, "id") else { continue };
+                let genres: Vec<String> = jsonapi::rel_ids(r, "genres").into_iter().map(|(_, g)| g).collect();
+                if !genres.is_empty() {
+                    out.insert(id, genres);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     // ----------------------------------------------------------- favourites
 
     pub async fn set_favourite_tracks(&self, ids: &[String], add: bool) -> Result<()> {
@@ -968,5 +1046,59 @@ mod tests {
         assert!(c.playback_restriction("flaky").await.is_err(), "other errors are reported, not hidden");
         let e = c.track_manifest("geo").await.unwrap_err();
         assert_eq!(e.code(), Some("GEO_RESTRICTED"));
+    }
+
+    #[tokio::test]
+    async fn similar_tracks_and_genres() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v2/tracks/1/relationships/similarTracks"))
+            .and(query_param("include", "similarTracks,similarTracks.artists,similarTracks.albums"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{"type": "tracks", "id": "7"}, {"type": "tracks", "id": "8"}],
+                "included": [
+                    {"type": "tracks", "id": "7", "attributes": {"title": "Seven"},
+                     "relationships": {"artists": {"data": [{"type": "artists", "id": "a"}]}}},
+                    {"type": "tracks", "id": "8", "attributes": {"title": "Eight"}},
+                    {"type": "artists", "id": "a", "attributes": {"name": "Ann"}}
+                ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/tracks/gone/relationships/similarTracks"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/genres"))
+            .and(query_param("filter[id]", "USER_SELECTABLE"))
+            .and(query_param("locale", "nb-NO"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{"type": "genres", "id": "g1", "attributes": {"genreName": "Pop"}}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/tracks"))
+            .and(query_param("includeLinkage", "genres"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [
+                    {"type": "tracks", "id": "7", "relationships": {"genres": {"data": [{"type": "genres", "id": "g1"}]}}},
+                    {"type": "tracks", "id": "8", "relationships": {"genres": {"data": []}}}
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let c = client(&server, far());
+        let sim = c.similar_tracks("1").await.unwrap();
+        assert_eq!(sim.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), ["Seven", "Eight"]);
+        assert_eq!(sim[0].artists, ["Ann"]);
+        assert!(c.similar_tracks("gone").await.unwrap().is_empty(), "a missing seed gives no suggestions");
+        let g = c.genres("nb-NO").await.unwrap();
+        assert_eq!((g[0].id.as_str(), g[0].name.as_str()), ("g1", "Pop"));
+        let tags = c.track_genres(&["7".into(), "8".into()], &|| false).await.unwrap();
+        assert_eq!(tags.get("7"), Some(&vec!["g1".to_owned()]));
+        assert!(!tags.contains_key("8"), "no genres means no entry");
     }
 }

@@ -15,9 +15,10 @@ use std::sync::Arc;
 use egui::{Key, KeyboardShortcut, Modifiers};
 
 use crate::api::auth::AuthConfig;
-use crate::api::{Album, Artist, ItemRef, Playlist, PlaylistItem, SearchResults, Track, User};
+use crate::api::{Album, Artist, Genre, ItemRef, Playlist, PlaylistItem, SearchResults, Track, User};
 use crate::i18n::{self, Tr};
 use crate::ops::analysis::SortKey;
+use crate::ops::recommend::{self, Recommendation};
 use crate::player::{PlayerCmd, PlayerHandle};
 use crate::spotify::{SpPlaylist, SpUser};
 use crate::store::{Config, OpenIn, Paths, TrackCache};
@@ -95,6 +96,7 @@ pub enum JobKind {
     SpotifyLogin,
     Scan,
     Replacements,
+    Recommend,
     Match,
     Export,
 }
@@ -138,6 +140,10 @@ pub struct App {
     pub items: HashMap<String, Vec<PlaylistItem>>,
     pub loading: HashSet<String>,
     pub views: HashMap<String, ViewState>,
+    /// TIDAL's genre list, loaded the first time «Generate playlists» opens.
+    pub genres: Option<Result<Vec<Genre>, String>>,
+    /// Seed rows of a pending recommendation search, per playlist.
+    pub recommend_rows: HashMap<String, HashSet<String>>,
     pub undo: HashMap<String, Vec<Vec<ItemRef>>>,
     pub redo: HashMap<String, Vec<Vec<ItemRef>>>,
     pub search: SearchState,
@@ -190,6 +196,8 @@ impl App {
             items: HashMap::new(),
             loading: HashSet::new(),
             views: HashMap::new(),
+            recommend_rows: HashMap::new(),
+            genres: None,
             undo: HashMap::new(),
             redo: HashMap::new(),
             search: SearchState {
@@ -311,7 +319,7 @@ impl App {
     fn open_result(&mut self, d: Dialog) {
         let replaceable = matches!(
             self.dialog,
-            None | Some(Dialog::Unavailable(_) | Dialog::ImportReview { .. })
+            None | Some(Dialog::Unavailable(_) | Dialog::Recommend(_) | Dialog::ImportReview { .. })
                 | Some(Dialog::FromSpotify { .. } | Dialog::ToSpotify { .. })
         );
         if replaceable {
@@ -390,6 +398,22 @@ impl App {
 
     pub fn play(&mut self, t: &Track) {
         self.worker.send(Cmd::Preview(t.clone()));
+    }
+
+    /// Asks TIDAL for songs like those in `pid` (the item ids in `rows`, or
+    /// the whole playlist when empty), leaving out songs already `shown`.
+    pub fn recommend(&mut self, pid: &str, rows: HashSet<String>, shown: &[Recommendation]) {
+        let Some(items) = self.items.get(pid) else { return };
+        let seeds = recommend::pick_seeds(items, &rows);
+        if seeds.is_empty() {
+            self.error(self.tr.no_seed_songs);
+            return;
+        }
+        let mut have: Vec<Track> = items.iter().filter_map(|i| self.track_meta(i)).collect();
+        have.extend(shown.iter().map(|r| r.track.clone()));
+        self.recommend_rows.insert(pid.to_owned(), rows);
+        let job = self.start_job(self.tr.finding_recommendations, JobKind::Recommend);
+        self.worker.send(Cmd::Recommend { pid: pid.to_owned(), seeds, have, job });
     }
 
     /// Adds tracks to a playlist (with undo snapshot and optimistic job entry).
@@ -593,6 +617,11 @@ impl App {
             }
             Event::JobFailed { job, error } => {
                 let info = self.finish_job(job);
+                if info.as_ref().is_some_and(|j| j.kind == JobKind::Recommend)
+                    && let Some(Dialog::Recommend(r)) = &mut self.dialog
+                {
+                    r.searching = false;
+                }
                 let label = info.map(|j| j.label).unwrap_or_default();
                 if error == "cancelled" {
                     self.note(format!("{label}: {}", tr.cancelled));
@@ -612,6 +641,14 @@ impl App {
                     .collect();
                 self.open_result(Dialog::unavailable_results(hits));
             }
+            Event::Genres(r) => self.genres = Some(r),
+            Event::Recommendations { pid, recs } => match &mut self.dialog {
+                Some(Dialog::Recommend(r)) if r.pid == pid && r.searching => r.append(recs),
+                _ => {
+                    let rows = self.recommend_rows.remove(&pid).unwrap_or_default();
+                    self.open_result(Dialog::recommend(pid, recs, rows));
+                }
+            },
             Event::Replacements(list) => {
                 if let Some(Dialog::Unavailable(u)) = &mut self.dialog {
                     u.set_replacements(list);
@@ -696,6 +733,15 @@ impl App {
             Note::Deleted => tr.playlist_deleted.into(),
             Note::Restored => tr.restored.into(),
             Note::Replaced(n) => i18n::fmt(tr.replaced_n, &[&n.to_string()]),
+            Note::Generated { playlists: 0, .. } => tr.generated_none.into(),
+            Note::Generated { playlists, songs, wanted } => {
+                let text = i18n::fmt(tr.generated_n, &[&playlists.to_string(), &songs.to_string()]);
+                if songs < wanted {
+                    format!("{text} {}", i18n::fmt(tr.generated_fewer, &[&wanted.to_string()]))
+                } else {
+                    text
+                }
+            }
             Note::Favourited { n, add: true } => i18n::fmt(tr.favourited_n, &[&n.to_string()]),
             Note::Favourited { n, add: false } => i18n::fmt(tr.unfavourited_n, &[&n.to_string()]),
             Note::Skipped(n) => i18n::fmt(tr.skipped_n, &[&n.to_string()]),
@@ -875,6 +921,19 @@ impl App {
                         self.cfg.strict_availability,
                         self.cfg.geo_check,
                     ));
+                }
+                if ui.add_enabled(logged_in, egui::Button::new(tr.generate_playlists_dots)).clicked() {
+                    if !matches!(self.genres, Some(Ok(_))) {
+                        self.genres = None;
+                        self.worker.send(Cmd::LoadGenres);
+                    }
+                    self.open_dialog(Dialog::generate());
+                }
+                if ui.add_enabled(logged_in && cur.is_some(), egui::Button::new(tr.recommend_songs_dots)).clicked()
+                    && let Some(p) = &cur
+                {
+                    let rows = self.views.get(&p.id).map(|v| v.selected.clone()).unwrap_or_default();
+                    self.recommend(&p.id, rows, &[]);
                 }
                 if ui.add_enabled(cur.is_some(), egui::Button::new(tr.find_duplicates_dots)).clicked()
                     && let Some(p) = &cur

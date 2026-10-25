@@ -15,6 +15,8 @@ with your own TIDAL account through your own developer app.
   - sort or shuffle a playlist permanently;
   - undo and redo.
 - **Find new songs:** search the TIDAL catalogue for tracks, albums and artists, and add one song, a selection or a whole album to one or more playlists.
+- **Recommendations:** Tools → "Recommend songs…" (or "Similar songs…" on selected rows) asks TIDAL for songs like the ones in the playlist, ranks them, leaves out songs you already have, and lets you preview and add the ones you pick.
+- **Generate playlists:** Tools → "Generate playlists…": choose genres and how many songs, and get one mixed playlist or one per genre, filled with songs from TIDAL that are not already in your playlists.
 - **Unavailable songs:**
   - scan one or all playlists for songs TIDAL no longer offers in your country, with an optional thorough check of streaming rights;
   - remove them, or replace them with the same recording (ISRC) or the best search match.
@@ -128,6 +130,8 @@ TIDAL-konto via din egen utviklerapp.
   - sorter eller stokk en spilleliste permanent;
   - angre og gjør om.
 - **Finn nye sanger:** søk i TIDAL etter spor, album og artister, og legg til én sang, et utvalg eller et helt album i én eller flere spillelister.
+- **Anbefalinger:** Verktøy → «Anbefal sanger …» (eller «Lignende sanger …» på valgte rader) ber TIDAL om sanger som ligner på dem i spillelisten, rangerer dem, utelater sanger du allerede har, og lar deg høre smakebiter og legge til dem du velger.
+- **Lag spillelister:** Verktøy → «Lag spillelister …»: velg sjangre og hvor mange sanger, og få én blandet spilleliste eller én per sjanger, fylt med sanger fra TIDAL som ikke allerede er i spillelistene dine.
 - **Utilgjengelige sanger:**
   - søk gjennom én eller alle spillelister etter sanger TIDAL ikke lenger tilbyr i landet ditt, med valgfri grundig sjekk av strømmerettigheter;
   - fjern dem, eller erstatt dem med samme innspilling (ISRC) eller beste søketreff.

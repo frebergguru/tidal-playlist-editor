@@ -9,11 +9,13 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::api::auth::{self, AuthConfig};
 use crate::api::{
-    AccessType, Album, ApiError, Artist, Client, ItemRef, Playlist, PlaylistItem, SearchResults, Track, User,
+    AccessType, Album, ApiError, Artist, Client, Genre, ItemRef, Playlist, PlaylistItem, SearchResults, Track, User,
 };
 use crate::ops::analysis;
 use crate::ops::files::{ExportFormat, ImportPlaylist};
+use crate::ops::generate;
 use crate::ops::matcher::{self, MatchRow};
+use crate::ops::recommend::{self, Recommendation};
 use crate::player::{PlayerCmd, PlayerHandle, dash};
 use crate::spotify::{SpPlaylist, SpUser, SpotifyClient};
 
@@ -160,6 +162,26 @@ pub enum Cmd {
         ids: Vec<String>,
         add: bool,
     },
+    /// Similar songs for `pid`, from TIDAL's similar tracks of each seed.
+    /// `have`: songs to leave out (already in the playlist or already shown).
+    Recommend {
+        pid: String,
+        seeds: Vec<String>,
+        have: Vec<Track>,
+        job: Job,
+    },
+    LoadGenres,
+    /// New playlists of songs from `genres`: one per genre when `names` has
+    /// one name per genre, else one mixed playlist named `names[0]`. Songs in
+    /// the `known` playlists are left out.
+    Generate {
+        genres: Vec<Genre>,
+        count: usize,
+        names: Vec<String>,
+        description: String,
+        known: Vec<Playlist>,
+        job: Job,
+    },
     Preview(Track),
     SpotifyRestore(AuthConfig),
     SpotifyLogin(AuthConfig, Job),
@@ -213,6 +235,11 @@ pub enum Note {
     Deleted,
     Restored,
     Replaced(usize),
+    Generated {
+        playlists: usize,
+        songs: usize,
+        wanted: usize,
+    },
     Favourited {
         n: usize,
         add: bool,
@@ -283,6 +310,11 @@ pub enum Event {
         error: String,
     },
     Unavailable(Vec<UnavailableHit>),
+    Genres(Result<Vec<Genre>, String>),
+    Recommendations {
+        pid: String,
+        recs: Vec<Recommendation>,
+    },
     Replacements(Vec<(UnavailableHit, Option<Track>)>),
     Matches {
         dest: Dest,
@@ -531,6 +563,11 @@ async fn handle(ctx: Ctx, cmd: Cmd) {
                 Err(e) => ctx.emit(Event::Error(err_text(&e))),
             }
         }
+        Cmd::LoadGenres => {
+            let locale = if std::ptr::eq(crate::i18n::current(), &crate::i18n::NB) { "nb-NO" } else { "en-US" };
+            let r = async { ctx.client().await?.genres(locale).await }.await;
+            ctx.emit(Event::Genres(r.map_err(|e| err_text(&e))));
+        }
         Cmd::Preview(track) => preview(&ctx, track).await,
         Cmd::SpotifyRestore(cfg) => {
             let Some(tokens) = auth::load_tokens(&ctx.sp_token_path) else { return };
@@ -591,6 +628,8 @@ async fn run_job(ctx: &Ctx, cmd: Cmd) {
         | Cmd::Merge { job, .. }
         | Cmd::ScanUnavailable { job, .. }
         | Cmd::FindReplacements { job, .. }
+        | Cmd::Recommend { job, .. }
+        | Cmd::Generate { job, .. }
         | Cmd::Replace { job, .. }
         | Cmd::Match { job, .. }
         | Cmd::FetchForExport { job, .. }
@@ -833,6 +872,74 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
             }
             ctx.emit(Event::Unavailable(hits));
             Ok(None)
+        }
+        Cmd::Recommend { pid, seeds, have, .. } => {
+            let total = seeds.len();
+            let mut lists = Vec::with_capacity(total);
+            for (n, id) in seeds.iter().enumerate() {
+                if cancel() {
+                    return Err(ApiError::Cancelled);
+                }
+                lists.push(c.similar_tracks(id).await?);
+                ctx.emit(Event::Progress { job: job.id, done: n + 1, total });
+            }
+            ctx.emit(Event::Recommendations { pid, recs: recommend::rank(lists, &have) });
+            Ok(None)
+        }
+        Cmd::Generate { genres, count, names, description, known, .. } => {
+            let per_genre = names.len() == genres.len() && genres.len() > 1;
+            let total = known.len() + genres.len() + if per_genre { genres.len() } else { 1 };
+            let mut step = 0;
+            let mut tick = || {
+                step += 1;
+                ctx.emit(Event::Progress { job: job.id, done: step, total });
+            };
+            let mut have = std::collections::HashSet::new();
+            for p in &known {
+                if cancel() {
+                    return Err(ApiError::Cancelled);
+                }
+                let items = c.playlist_items(&p.id, &cancel).await?;
+                have.extend(items.iter().filter_map(|i| i.track.as_ref()).flat_map(recommend::keys));
+                ctx.emit(Event::Items { pid: p.id.clone(), items });
+                tick();
+            }
+            let wants = if per_genre { vec![count; genres.len()] } else { generate::split(count, genres.len()) };
+            let mut lists = Vec::new();
+            for (g, want) in genres.iter().zip(wants) {
+                let songs = genre_songs(&c, g, want, &have, &cancel).await?;
+                // A song picked for one genre is not picked again for another.
+                have.extend(songs.iter().flat_map(recommend::keys));
+                lists.push(songs);
+                tick();
+            }
+            let outputs: Vec<(String, Vec<Track>)> = if per_genre {
+                names.into_iter().zip(lists).collect()
+            } else {
+                vec![(names.into_iter().next().unwrap_or_default(), generate::interleave(lists))]
+            };
+            let _g = ctx.write_lock.lock().await;
+            let (mut made, mut songs) = (0, 0);
+            for (name, tracks) in outputs {
+                if tracks.is_empty() || cancel() {
+                    continue;
+                }
+                let p = c.create_playlist(&name, &description, AccessType::Unlisted).await?;
+                ctx.emit(Event::PlaylistCreated(p.clone()));
+                let refs: Vec<ItemRef> = tracks.iter().map(Track::item_ref).collect();
+                let r = c.add_items(&p.id, &refs, None, false, &|_| {}, &cancel).await;
+                refresh_meta(ctx, &c, &p.id).await;
+                reload(ctx, &p.id).await;
+                r?;
+                made += 1;
+                songs += refs.len();
+                tick();
+            }
+            if cancel() {
+                return Err(ApiError::Cancelled);
+            }
+            let wanted = if per_genre { count * genres.len() } else { count };
+            Ok(Some(Note::Generated { playlists: made, songs, wanted }))
         }
         Cmd::FindReplacements { hits, .. } => {
             let mut list = Vec::new();
@@ -1171,6 +1278,68 @@ async fn load_playlists(ctx: &Ctx) {
         Ok(p) => ctx.emit(Event::Playlists(p)),
         Err(e) => ctx.emit(Event::Error(err_text(&e))),
     }
+}
+
+/// TIDAL playlists searched per genre for songs.
+const GENRE_SOURCES: usize = 8;
+
+/// Up to `want` playable songs for a genre that are not in `have`: tracks from
+/// TIDAL playlists and tracks found by searching the genre's name, kept when
+/// TIDAL's genre tags agree (or are missing).
+async fn genre_songs(
+    c: &Client,
+    g: &Genre,
+    want: usize,
+    have: &std::collections::HashSet<String>,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<Vec<Track>, ApiError> {
+    if want == 0 {
+        return Ok(Vec::new());
+    }
+    let mut found = Vec::new();
+    match c.search(&g.name).await {
+        Ok(s) => found.extend(s.tracks),
+        Err(e) if e.status().is_some() => tracing::debug!("track search for {}: {e}", g.name),
+        Err(e) => return Err(e),
+    }
+    let sources = match c.search_playlists(&g.name).await {
+        Ok(p) => p,
+        Err(e) if e.status().is_some() => {
+            tracing::debug!("playlist search for {}: {e}", g.name);
+            Vec::new()
+        }
+        Err(e) => return Err(e),
+    };
+    // Gather about three times what is needed, so the genre check and the
+    // songs already owned leave enough.
+    for p in sources.iter().take(GENRE_SOURCES) {
+        if found.len() >= want * 3 {
+            break;
+        }
+        match c.playlist_items(&p.id, cancel).await {
+            Ok(items) => found.extend(items.into_iter().filter_map(|i| i.track)),
+            Err(ApiError::Cancelled) => return Err(ApiError::Cancelled),
+            Err(e) => tracing::debug!("genre source {}: {e}", p.id),
+        }
+    }
+    let mut picked = Vec::new();
+    for chunk in generate::fresh(found, have).chunks(crate::api::client::FILTER_BATCH) {
+        let ids: Vec<String> = chunk.iter().map(|t| t.id.clone()).collect();
+        let tags = match c.track_genres(&ids, cancel).await {
+            Ok(t) => t,
+            Err(ApiError::Cancelled) => return Err(ApiError::Cancelled),
+            Err(e) => {
+                tracing::debug!("genre tags: {e}");
+                Default::default()
+            }
+        };
+        picked.extend(chunk.iter().filter(|t| generate::matches_genre(t, &g.id, &tags)).cloned());
+        if picked.len() >= want {
+            break;
+        }
+    }
+    picked.truncate(want);
+    Ok(picked)
 }
 
 async fn reload(ctx: &Ctx, pid: &str) {
