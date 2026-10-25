@@ -114,6 +114,14 @@ pub struct BetterDialog {
     pub use_better: Vec<bool>,
 }
 
+pub struct AcrossDialog {
+    /// «Where is this song?»: only this song. `None`: every song in several playlists.
+    pub only: Option<Track>,
+    pub by_isrc: bool,
+    /// (playlist id, item id) of the occurrences to remove.
+    pub remove: HashSet<(String, String)>,
+}
+
 pub struct GenerateDialog {
     /// The built-in genres, then any the user typed in.
     pub genres: Vec<Genre>,
@@ -202,6 +210,11 @@ pub enum Dialog {
     Generate(Box<GenerateDialog>),
     Videos(Box<VideosDialog>),
     Better(Box<BetterDialog>),
+    Across(Box<AcrossDialog>),
+    Trim {
+        pid: String,
+        minutes: u32,
+    },
     Duplicates {
         pid: String,
         mode: DupMode,
@@ -348,6 +361,9 @@ impl Dialog {
             change,
             use_better,
         }))
+    }
+    pub fn across(only: Option<Track>) -> Self {
+        Dialog::Across(Box::new(AcrossDialog { only, by_isrc: false, remove: HashSet::new() }))
     }
     pub fn generate(norwegian: bool) -> Self {
         Dialog::Generate(Box::new(GenerateDialog {
@@ -713,6 +729,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         Dialog::Generate(g) => generate(app, ctx, g, first),
         Dialog::Videos(v) => videos(app, ctx, v, first),
         Dialog::Better(b) => better(app, ctx, b, first),
+        Dialog::Across(a) => across(app, ctx, a, first),
+        Dialog::Trim { pid, minutes } => trim(app, ctx, pid, minutes, first),
         Dialog::Duplicates { pid, mode, groups, remove, seen } => {
             // The list changed under the dialog (reload, undo): work the groups
             // out again, keeping the user's choices for rows that still exist.
@@ -1227,6 +1245,126 @@ fn videos(app: &mut App, ctx: &egui::Context, v: &mut VideosDialog, first: bool)
                 app.worker.send(Cmd::Replace { pid, swaps, job });
             }
         }
+    }
+    if ok || cancel || esc { Outcome::Close } else { Outcome::Keep }
+}
+
+/// «Duplicates across playlists» and «Where is this song?».
+fn across(app: &mut App, ctx: &egui::Context, a: &mut AcrossDialog, first: bool) -> Outcome {
+    let tr = app.tr;
+    let loading = app.job_running(&JobKind::LoadAll);
+    let lists: Vec<(&str, &[PlaylistItem])> =
+        app.playlists.iter().filter_map(|p| app.items.get(&p.id).map(|v| (p.id.as_str(), v.as_slice()))).collect();
+    let cache = |r: &ItemRef| app.cache.get(r);
+    let groups: Vec<analysis::CrossGroup> = match &a.only {
+        Some(t) => {
+            let places = analysis::places_of(&lists, t, a.by_isrc, &cache);
+            vec![analysis::CrossGroup { track: t.clone(), places }]
+        }
+        None => analysis::across_playlists(&lists, a.by_isrc, &cache),
+    };
+    // Occurrences no longer there (a reload after a change) are not removed.
+    let present: HashSet<&(String, String)> = groups.iter().flat_map(|g| &g.places).collect();
+    a.remove.retain(|k| present.contains(k));
+    let names: HashMap<&str, (&str, bool)> =
+        app.playlists.iter().map(|p| (p.id.as_str(), (p.name.as_str(), p.owned))).collect();
+    let title = if a.only.is_some() { tr.where_is_title } else { tr.across_title };
+    let (esc, (ok, cancel)) = frame(ctx, "across", title, |ui| {
+        let c = ui.checkbox(&mut a.by_isrc, tr.same_recording);
+        if first {
+            c.request_focus();
+        }
+        if loading {
+            ui.horizontal(|ui| {
+                super::style::busy(ui, app.reduced_motion);
+                ui.label(format!("{} ({}/{})", tr.loading_playlists, lists.len(), app.playlists.len()));
+            });
+        }
+        match &a.only {
+            Some(t) => {
+                let n = groups[0].places.iter().map(|(p, _)| p).collect::<HashSet<_>>().len();
+                ui.label(i18n::fmt(tr.song_in_n, &[&track_desc(tr, Some(t), &t.id), &n.to_string()]));
+            }
+            None if groups.is_empty() && !loading => {
+                ui.label(tr.no_across);
+            }
+            None => {
+                ui.label(i18n::fmt(tr.across_found_n, &[&groups.len().to_string()]));
+            }
+        }
+        egui::ScrollArea::vertical().max_height(ui.available_height() - 80.0).show(ui, |ui| {
+            for (n, g) in groups.iter().enumerate() {
+                ui.push_id(n, |ui| {
+                    if a.only.is_none() {
+                        ui.add_space(4.0);
+                        let lists = g.places.iter().map(|(p, _)| p).collect::<HashSet<_>>().len();
+                        let desc = track_desc(tr, Some(&g.track), &g.track.id);
+                        ui.strong(i18n::fmt(tr.in_n_playlists, &[&desc, &lists.to_string()]));
+                    }
+                    for place in &g.places {
+                        let (name, owned) = names.get(place.0.as_str()).copied().unwrap_or(("?", false));
+                        let mut on = a.remove.contains(place);
+                        let text = if owned {
+                            i18n::fmt(tr.remove_from, &[name])
+                        } else {
+                            format!("{} ({})", i18n::fmt(tr.remove_from, &[name]), tr.not_yours)
+                        };
+                        ui.push_id(&place.1, |ui| {
+                            if ui.add_enabled(owned, egui::Checkbox::new(&mut on, text)).changed() {
+                                if on {
+                                    a.remove.insert(place.clone());
+                                } else {
+                                    a.remove.remove(place);
+                                }
+                            }
+                        });
+                    }
+                });
+            }
+        });
+        let n = a.remove.len();
+        ok_cancel(ui, tr, &i18n::fmt(tr.remove_n, &[&n.to_string()]), n > 0)
+    });
+    if ok {
+        let mut by_pid: HashMap<String, HashSet<String>> = HashMap::new();
+        for (pid, item) in std::mem::take(&mut a.remove) {
+            by_pid.entry(pid).or_default().insert(item);
+        }
+        for (pid, ids) in by_pid {
+            app.remove_from_playlist(&pid, &ids);
+        }
+    }
+    if ok || cancel || esc { Outcome::Close } else { Outcome::Keep }
+}
+
+/// «Trim to a length»: removes the songs after about `minutes` of music.
+fn trim(app: &mut App, ctx: &egui::Context, pid: &str, minutes: &mut u32, first: bool) -> Outcome {
+    let tr = app.tr;
+    let items = app.items.get(pid).cloned().unwrap_or_default();
+    let remove = analysis::trim_to(&items, *minutes * 60);
+    let kept: Vec<&PlaylistItem> = items.iter().filter(|i| !remove.contains(&i.item_id)).collect();
+    let secs: u32 = kept.iter().filter_map(|i| i.track.as_ref()).map(|t| t.duration_secs).sum();
+    let (esc, (ok, cancel)) = frame(ctx, "trim", tr.trim_title, |ui| {
+        ui.label(tr.trim_explain);
+        let (mut h, mut m) = (*minutes / 60, *minutes % 60);
+        ui.horizontal(|ui| {
+            let l = ui.label(tr.hours);
+            let r = ui.add(egui::DragValue::new(&mut h).range(0..=99)).labelled_by(l.id);
+            if first {
+                r.request_focus();
+            }
+            let l = ui.label(tr.minutes);
+            ui.add(egui::DragValue::new(&mut m).range(0..=59)).labelled_by(l.id);
+        });
+        *minutes = (h * 60 + m).max(1);
+        ui.label(i18n::fmt(
+            tr.trim_result,
+            &[&kept.len().to_string(), &format_duration(secs), &remove.len().to_string()],
+        ));
+        ok_cancel(ui, tr, &i18n::fmt(tr.remove_n, &[&remove.len().to_string()]), !remove.is_empty())
+    });
+    if ok {
+        app.remove_from_playlist(pid, &remove);
     }
     if ok || cancel || esc { Outcome::Close } else { Outcome::Keep }
 }

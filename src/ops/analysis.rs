@@ -115,6 +115,101 @@ pub fn find_duplicates(
     out
 }
 
+/// One song found in several playlists.
+#[derive(Clone, Debug)]
+pub struct CrossGroup {
+    pub track: Track,
+    /// (playlist id, item id) of every occurrence, in the order of the lists.
+    pub places: Vec<(String, String)>,
+}
+
+/// Songs that occur in more than one of `lists` (playlist id, items): the same
+/// TIDAL id, or with `by_isrc` also the same recording. Sorted by artist, title.
+pub fn across_playlists(
+    lists: &[(&str, &[PlaylistItem])],
+    by_isrc: bool,
+    cache: &dyn Fn(&ItemRef) -> Option<Track>,
+) -> Vec<CrossGroup> {
+    let mut group_of: HashMap<String, usize> = HashMap::new();
+    let mut groups: Vec<CrossGroup> = Vec::new();
+    for (pid, items) in lists {
+        for it in *items {
+            let Some(meta) = it.track.clone().or_else(|| cache(&it.r)) else { continue };
+            let mut keys = vec![format!("id:{:?}:{}", it.r.kind, it.r.id)];
+            if by_isrc && let Some(isrc) = &meta.isrc {
+                keys.push(format!("isrc:{}", isrc.to_uppercase()));
+            }
+            let g = match keys.iter().find_map(|k| group_of.get(k).copied()) {
+                Some(g) => g,
+                None => {
+                    groups.push(CrossGroup { track: meta, places: Vec::new() });
+                    groups.len() - 1
+                }
+            };
+            for k in keys {
+                group_of.entry(k).or_insert(g);
+            }
+            groups[g].places.push(((*pid).to_owned(), it.item_id.clone()));
+        }
+    }
+    groups.retain(|g| g.places.iter().map(|(p, _)| p).collect::<HashSet<_>>().len() > 1);
+    let key = |t: &Track| (t.artist_line().to_lowercase(), t.full_title().to_lowercase());
+    groups.sort_by_key(|g| key(&g.track));
+    groups
+}
+
+/// Where `track` occurs in `lists`: by id, or with `by_isrc` also by recording.
+pub fn places_of(
+    lists: &[(&str, &[PlaylistItem])],
+    track: &Track,
+    by_isrc: bool,
+    cache: &dyn Fn(&ItemRef) -> Option<Track>,
+) -> Vec<(String, String)> {
+    let isrc = track.isrc.as_ref().map(|i| i.to_uppercase()).filter(|_| by_isrc);
+    let mut out = Vec::new();
+    for (pid, items) in lists {
+        for it in *items {
+            let same = (it.r.kind == track.kind && it.r.id == track.id)
+                || isrc.as_ref().is_some_and(|i| {
+                    it.track
+                        .clone()
+                        .or_else(|| cache(&it.r))
+                        .and_then(|t| t.isrc)
+                        .is_some_and(|x| x.to_uppercase() == *i)
+                });
+            if same {
+                out.push(((*pid).to_owned(), it.item_id.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// Item ids to remove so the playlist lasts about `target` seconds: songs are
+/// kept from the start while they fit, and the next one too when that comes
+/// closer to the target than stopping. Items of unknown length are kept.
+pub fn trim_to(items: &[PlaylistItem], target: u32) -> HashSet<String> {
+    let mut total = 0u32;
+    let mut full = false;
+    let mut remove = HashSet::new();
+    for it in items {
+        let d = it.track.as_ref().map_or(0, |t| t.duration_secs);
+        if d == 0 {
+            continue;
+        }
+        if !full && total + d <= target {
+            total += d;
+        } else if !full && (total + d - target) < (target - total) {
+            total += d;
+            full = true;
+        } else {
+            full = true;
+            remove.insert(it.item_id.clone());
+        }
+    }
+    remove
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Diff {
     /// In the target (backup) but not in the playlist now.
@@ -346,6 +441,48 @@ mod tests {
         let loose = find_duplicates(&items, DupMode::Loose, &|_: &ItemRef| None);
         let groups: Vec<(usize, Vec<usize>)> = loose.into_iter().map(|g| (g.keep, g.extra)).collect();
         assert_eq!(groups, vec![(0, vec![3, 4]), (1, vec![5])]);
+    }
+
+    #[test]
+    fn songs_across_playlists() {
+        let a = vec![item(1, "1", Some("I1"), "Song"), item(2, "2", Some("I2"), "Other")];
+        let b = vec![item(3, "1", Some("I1"), "Song"), item(4, "9", Some("I2"), "Other (Remaster)")];
+        let c = vec![item(5, "2", Some("I2"), "Other"), item(6, "2", Some("I2"), "Other")];
+        let lists: Vec<(&str, &[PlaylistItem])> = vec![("a", &a), ("b", &b), ("c", &c)];
+        let none = |_: &ItemRef| None;
+        let by_id = across_playlists(&lists, false, &none);
+        let ids = |g: &CrossGroup| g.places.iter().map(|(p, i)| format!("{p}/{i}")).collect::<Vec<_>>();
+        assert_eq!(by_id.len(), 2);
+        assert_eq!(ids(&by_id[0]), ["a/occ2", "c/occ5", "c/occ6"], "Other sorts before Song");
+        assert_eq!(ids(&by_id[1]), ["a/occ1", "b/occ3"]);
+        let by_isrc = across_playlists(&lists, true, &none);
+        assert_eq!(ids(&by_isrc[0]), ["a/occ2", "b/occ4", "c/occ5", "c/occ6"]);
+        // Twice in one playlist only is not «across».
+        let solo: Vec<(&str, &[PlaylistItem])> = vec![("c", &c)];
+        assert!(across_playlists(&solo, false, &none).is_empty());
+        let t = a[1].track.clone().unwrap();
+        assert_eq!(places_of(&lists, &t, false, &none).len(), 3);
+        assert_eq!(places_of(&lists, &t, true, &none).len(), 4);
+    }
+
+    #[test]
+    fn trims_to_about_a_length() {
+        let mk = |n: usize, secs: u32| {
+            let mut it = item(n, &n.to_string(), None, "x");
+            it.track.as_mut().unwrap().duration_secs = secs;
+            it
+        };
+        let items = vec![mk(1, 1500), mk(2, 1500), mk(3, 1000), mk(4, 0), mk(5, 100)];
+        let ids = |s: HashSet<String>| {
+            let mut v: Vec<String> = s.into_iter().collect();
+            v.sort();
+            v
+        };
+        // 1 hour: 3000 s fits; adding 1000 s overshoots by 400, closer than 600 short.
+        assert_eq!(ids(trim_to(&items, 3600)), ["occ5"]);
+        // 50 min: 3000 s fits exactly; nothing more.
+        assert_eq!(ids(trim_to(&items, 3000)), ["occ3", "occ5"]);
+        assert!(trim_to(&items, 10_000).is_empty());
     }
 
     #[test]

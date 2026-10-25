@@ -12,7 +12,7 @@ with your own TIDAL account through your own developer app.
 - **Songs:**
   - find, add and remove songs, and move them by drag-and-drop or Alt+↑/↓;
   - copy or move songs to other playlists;
-  - sort (also by TIDAL's popularity) or shuffle a playlist permanently;
+  - sort (also by TIDAL's popularity) or shuffle a playlist permanently, or trim it to about a given length;
   - undo and redo.
 - **Find new songs:** search the TIDAL catalogue for tracks, albums and artists, and add one song, a selection or a whole album to one or more playlists.
 - **Recommendations:** Tools → "Recommend songs…" (or "Similar songs…" on selected rows) asks TIDAL for songs like the ones in the playlist, ranks them, leaves out songs you already have, and lets you preview and add the ones you pick.
@@ -25,7 +25,7 @@ with your own TIDAL account through your own developer app.
 - **Sound quality:** Tools → "Upgrade sound quality…" finds other releases of the same recordings (same ISRC) in better quality — Hi-Res or lossless, optionally Dolby Atmos — and swaps the ticked songs in place. The quality is written next to each song.
 - **Clean versions:** Tools → "Clean versions…" lists the explicit songs and looks for a clean version of each; ticked songs are swapped in place, or removed when there is none.
 - **Radio:** right-click a song → "Make a playlist from this song's radio", or open an artist in the search panel → "Make a playlist from the artist's radio", saves TIDAL's radio mix as a new playlist that keeps the songs after the mix changes.
-- **Duplicates:** find songs with the same TIDAL id, the same recording (ISRC), or the same artist and title.
+- **Duplicates:** find songs with the same TIDAL id, the same recording (ISRC), or the same artist and title. Tools → "Duplicates across playlists…" lists songs that are in more than one playlist, and right-click → "Find in all playlists…" shows every playlist that has a song; tick the copies to remove.
 - **Export:** JSON (full detail), CSV, M3U8 and XSPF, for one, several or all playlists.
 - **Backup and restore:** "Back up all playlists" writes a timestamped folder. A restore compares a backup with the current playlist, shows what differs, and puts the songs and their order back.
 - **Import:**
@@ -132,7 +132,7 @@ TIDAL-konto via din egen utviklerapp.
 - **Sanger:**
   - finn, legg til og fjern sanger, og flytt dem med dra-og-slipp eller Alt+↑/↓;
   - kopier eller flytt sanger til andre spillelister;
-  - sorter (også etter popularitet i TIDAL) eller stokk en spilleliste permanent;
+  - sorter (også etter popularitet i TIDAL) eller stokk en spilleliste permanent, eller kort den ned til omtrent en gitt lengde;
   - angre og gjør om.
 - **Finn nye sanger:** søk i TIDAL etter spor, album og artister, og legg til én sang, et utvalg eller et helt album i én eller flere spillelister.
 - **Anbefalinger:** Verktøy → «Anbefal sanger …» (eller «Lignende sanger …» på valgte rader) ber TIDAL om sanger som ligner på dem i spillelisten, rangerer dem, utelater sanger du allerede har, og lar deg høre smakebiter og legge til dem du velger.
@@ -145,7 +145,7 @@ TIDAL-konto via din egen utviklerapp.
 - **Lydkvalitet:** Verktøy → «Oppgrader lydkvalitet …» finner andre utgivelser av de samme innspillingene (samme ISRC) i bedre kvalitet – Hi-Res eller tapsfri, eventuelt Dolby Atmos – og bytter ut de avkryssede sangene på samme plass. Kvaliteten står skrevet ved hver sang.
 - **Ikke-eksplisitte versjoner:** Verktøy → «Ikke-eksplisitte versjoner …» viser de eksplisitte sangene og leter etter en ikke-eksplisitt versjon av hver; avkryssede sanger byttes ut på samme plass, eller fjernes hvis det ikke finnes noen.
 - **Radio:** høyreklikk en sang → «Lag spilleliste av radioen til denne sangen», eller åpne en artist i søkepanelet → «Lag spilleliste av radioen til artisten», lagrer TIDAL-radiomiksen som en ny spilleliste som beholder sangene når miksen endrer seg.
-- **Duplikater:** finn sanger med samme TIDAL-id, samme innspilling (ISRC) eller samme artist og tittel.
+- **Duplikater:** finn sanger med samme TIDAL-id, samme innspilling (ISRC) eller samme artist og tittel. Verktøy → «Duplikater på tvers av spillelister …» viser sanger som ligger i mer enn én spilleliste, og høyreklikk → «Finn i alle spillelister …» viser alle spillelistene som har en sang; kryss av kopiene som skal fjernes.
 - **Eksport:** JSON (alle detaljer), CSV, M3U8 og XSPF, for én, flere eller alle spillelister.
 - **Sikkerhetskopi og gjenoppretting:** «Sikkerhetskopier alle spillelister» lager en mappe med tidsstempel. Ved gjenoppretting sammenlignes sikkerhetskopien med spillelisten slik den er nå, du ser hva som er forskjellig, og sangene og rekkefølgen settes tilbake.
 - **Import:**

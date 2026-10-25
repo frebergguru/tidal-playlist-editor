@@ -738,3 +738,58 @@ fn better_setup_offers_atmos_only_for_sound_quality() {
     h.run();
     assert_eq!(h.query_all_by_label("Count Dolby Atmos as the best quality").count(), 0);
 }
+
+#[test]
+fn songs_in_several_playlists_can_be_removed_from_some() {
+    let mut h = harness();
+    logged_in(&mut h);
+    {
+        let app = h.state_mut();
+        app.playlists.push(Playlist { id: "p3".into(), name: "Gym".into(), owned: true, ..Default::default() });
+        let mut copy = item(1, "First song", true);
+        copy.item_id = "gym1".into();
+        app.items.insert("p3".into(), vec![copy]);
+        app.open_across(None);
+    }
+    h.run();
+    h.get_by_label("1 songs are in more than one playlist.");
+    h.get_by_label("First song — Artist — in 2 playlists");
+    assert!(h.get_by_label("Also count other releases of the same recording (ISRC)").accesskit_node().is_focused());
+    h.get_by_role_and_label(Role::CheckBox, "Remove from «Gym»").click();
+    h.run();
+    h.get_by_label("Remove 1").click();
+    h.run();
+    assert!(h.state().dialog.is_none());
+    assert!(h.state().items["p3"].is_empty());
+    assert_eq!(h.state().items["p1"].len(), 3, "the other copy stays");
+    assert_eq!(h.state().undo["p3"].len(), 1, "undoable");
+}
+
+#[test]
+fn where_is_a_song() {
+    let mut h = harness();
+    logged_in(&mut h);
+    let t = h.state().items["p1"][1].track.clone();
+    h.state_mut().open_across(t);
+    h.run();
+    h.get_by_label("Where is this song?");
+    h.get_by_label("«Second song — Artist» is in 1 of your playlists.");
+    h.get_by_role_and_label(Role::CheckBox, "Remove from «Road trip»");
+    h.key_press(Key::Escape);
+    h.run();
+    assert!(h.state().dialog.is_none());
+}
+
+#[test]
+fn trim_keeps_about_the_chosen_length() {
+    let mut h = harness();
+    logged_in(&mut h);
+    h.state_mut().open_dialog(super::Dialog::Trim { pid: "p1".into(), minutes: 3 });
+    h.run();
+    // Songs of 3:01 and 3:02: three minutes keeps only the first.
+    h.get_by_label("Keeps 2 songs (3:01) and removes 1.");
+    h.get_by_label("Remove 1").click();
+    h.run();
+    assert!(h.state().dialog.is_none());
+    assert!(!h.state().items["p1"].iter().any(|i| i.item_id == "occ2"));
+}

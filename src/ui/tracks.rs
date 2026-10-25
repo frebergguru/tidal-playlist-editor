@@ -26,6 +26,7 @@ enum RowAction {
     Similar(HashSet<String>),
     CopyLink(usize),
     Radio(usize),
+    WhereIs(usize),
 }
 
 /// Indices into the playlist that are shown, after find filter and view sort.
@@ -564,6 +565,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         {
                             actions.push(RowAction::Radio(idx));
                         }
+                        if it.track.is_some() && ui.button(tr.where_is_dots).clicked() {
+                            actions.push(RowAction::WhereIs(idx));
+                        }
                         if ui.button(tr.remove).clicked() {
                             actions.push(RowAction::Remove(ids));
                         }
@@ -596,7 +600,8 @@ fn run_action(app: &mut App, pid: &str, a: RowAction, vis: &[usize]) {
         | RowAction::Play(idx)
         | RowAction::Open(idx)
         | RowAction::CopyLink(idx)
-        | RowAction::Radio(idx) => Some(*idx),
+        | RowAction::Radio(idx)
+        | RowAction::WhereIs(idx) => Some(*idx),
         RowAction::DropBefore { before, .. } => Some(*before),
         _ => None,
     };
@@ -688,6 +693,10 @@ fn run_action(app: &mut App, pid: &str, a: RowAction, vis: &[usize]) {
         }
         RowAction::Favourite(ids) => app.worker.send(Cmd::Favourite { ids, add: true }),
         RowAction::Similar(ids) => app.recommend(pid, ids, &[]),
+        RowAction::WhereIs(idx) => {
+            let t = app.track_meta(&items[idx]);
+            app.open_across(t);
+        }
         RowAction::Radio(idx) => {
             if let Some(t) = app.track_meta(&items[idx]) {
                 app.save_radio(crate::api::RadioSeed::Track(t.id.clone()), &t.full_title());

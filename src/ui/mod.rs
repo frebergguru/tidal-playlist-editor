@@ -99,6 +99,7 @@ pub enum JobKind {
     Recommend,
     Match,
     Export,
+    LoadAll,
 }
 
 pub struct JobInfo {
@@ -416,6 +417,18 @@ impl App {
         self.recommend_rows.insert(pid.to_owned(), rows);
         let job = self.start_job(self.tr.finding_recommendations, JobKind::Recommend);
         self.worker.send(Cmd::Recommend { pid: pid.to_owned(), seeds, have, job });
+    }
+
+    /// Opens «Duplicates across playlists» (or, with `only`, «Where is this
+    /// song?»), first loading every playlist not loaded yet.
+    pub fn open_across(&mut self, only: Option<Track>) {
+        let pids: Vec<String> =
+            self.playlists.iter().filter(|p| !self.items.contains_key(&p.id)).map(|p| p.id.clone()).collect();
+        if !pids.is_empty() && !self.job_running(&JobKind::LoadAll) {
+            let job = self.start_job(self.tr.loading_playlists, JobKind::LoadAll);
+            self.worker.send(Cmd::LoadAll { pids, job });
+        }
+        self.open_dialog(Dialog::across(only));
     }
 
     /// Saves TIDAL's radio for a song or artist (`what` names it) as a new playlist.
@@ -922,6 +935,11 @@ impl App {
                 {
                     tracks::shuffle(self, &p.id);
                 }
+                if ui.add_enabled(cur.as_ref().is_some_and(|p| p.owned), egui::Button::new(tr.trim_dots)).clicked()
+                    && let Some(p) = &cur
+                {
+                    self.open_dialog(Dialog::Trim { pid: p.id.clone(), minutes: 60 });
+                }
                 if ui.add_enabled(has, egui::Button::new(tr.statistics)).clicked()
                     && let Some(p) = &cur
                 {
@@ -979,6 +997,9 @@ impl App {
                 {
                     let d = Dialog::duplicates(self, &p.id);
                     self.open_dialog(d);
+                }
+                if ui.add_enabled(logged_in && self.playlists.len() > 1, egui::Button::new(tr.across_dots)).clicked() {
+                    self.open_across(None);
                 }
             });
             ui.menu_button(tr.menu_spotify, |ui| match self.spotify.clone() {

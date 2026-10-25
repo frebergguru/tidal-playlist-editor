@@ -201,6 +201,11 @@ pub enum Cmd {
         description: String,
         job: Job,
     },
+    /// Loads the items of every playlist in `pids` (as [`Event::Items`]).
+    LoadAll {
+        pids: Vec<String>,
+        job: Job,
+    },
     /// Every video in `playlists`, reported as [`Event::Videos`].
     FindVideos {
         playlists: Vec<Playlist>,
@@ -677,6 +682,7 @@ async fn run_job(ctx: &Ctx, cmd: Cmd) {
         | Cmd::FindVideos { job, .. }
         | Cmd::FindBetter { job, .. }
         | Cmd::SaveRadio { job, .. }
+        | Cmd::LoadAll { job, .. }
         | Cmd::FindMusic { job, .. }
         | Cmd::Generate { job, .. }
         | Cmd::Replace { job, .. }
@@ -991,6 +997,18 @@ async fn job_body(ctx: &Ctx, cmd: Cmd, job: &Job) -> Result<Option<Note>, ApiErr
                 ctx.emit(Event::Permille { job: job.id, done: (n + 1) * 1000 / total.max(1) });
             }
             ctx.emit(Event::Better { mode, hits });
+            Ok(None)
+        }
+        Cmd::LoadAll { pids, .. } => {
+            let total = pids.len();
+            for (n, pid) in pids.into_iter().enumerate() {
+                if cancel() {
+                    return Err(ApiError::Cancelled);
+                }
+                let items = c.playlist_items(&pid, &cancel).await?;
+                ctx.emit(Event::Items { pid, items });
+                ctx.emit(Event::Progress { job: job.id, done: n + 1, total });
+            }
             Ok(None)
         }
         Cmd::SaveRadio { seed, name, description, .. } => {
