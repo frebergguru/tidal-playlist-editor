@@ -16,10 +16,14 @@ for third-party apps (genres did), so check each one against the live API before
 
 ## New features
 
-- [ ] **Playlist folders** (`/userCollectionFolders`, `/folders`, `/folderItems`). Checked live:
-      there is no way to list a user's folders (`/userCollectionFolders` needs `filter[id]`,
-      `/userCollectionFolders/me` is 404, and `/userCollectionPlaylists/me` lists only playlists).
-      Needs an account with a folder to see where folder ids show up.
+- [ ] **Playlist folders.** Checked live with a real folder: only its id can be reached.
+      `/userCollectionPlaylists/me/relationships/items?collectionView=FOLDERS` lists the folder as a
+      `userCollectionFolders` item (its playlists then leave the top level), but the folder itself
+      gives nothing: `/userCollectionFolders/{id}` is 404; its `relationships/items`,
+      `/userCollectionFolders?filter[id]=`, `/folders?filter[id]=` and `/folderItems?filter[parent.id]=`
+      are all empty; and no include returns the folder resource. No name, no contents: not
+      buildable until TIDAL opens this up.
+
 ## Done
 
 - Release 0.2.0 built (`dist/0.2.0/`, stripped, tests and clippy clean).
